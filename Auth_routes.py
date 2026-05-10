@@ -1,15 +1,15 @@
 from fastapi import APIRouter
+from fastapi.encoders import jsonable_encoder
+from DB_conn import engine, alunos, professores, mensagens, mensagem_al, select, Session
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
-from DB_conn import engine, professores
 
-router = APIRouter()
+Auth_router = APIRouter()
 
 class CadastroProfessor(BaseModel):
     nomeProf: str
     senhaProf: str
 
-@router.post("/cadastro")
+@Auth_router.post("/cadastro")
 def cadastrarProfessor(dadosForm: CadastroProfessor):
     with Session(engine) as sessao:
         novo = professores(
