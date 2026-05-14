@@ -1,5 +1,5 @@
 from sqlalchemy import create_engine, select, Column, Integer, String, ForeignKey, Date, Table
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base, relationship, Session
 engine = create_engine('postgresql+psycopg2://postgres:123@localhost:5432/Usuarios_DB')
 
 base = declarative_base()
