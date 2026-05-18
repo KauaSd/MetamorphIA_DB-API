@@ -3,14 +3,14 @@ from fastapi.encoders import jsonable_encoder
 from DB_conn import engine, alunos, professores, mensagens, mensagem_al, select, Session
 from pydantic import BaseModel
 
-Auth_router = APIRouter()
+Auth_router = APIRouter(prefix="/autenticar", tags=["autenticar"])
 
-class CadastroProfessor(BaseModel):
+class Professor(BaseModel):
     nomeProf: str
     senhaProf: str
 
-@Auth_router.post("/cadastro")
-def cadastrarProfessor(dadosForm: CadastroProfessor):
+@Auth_router.post("/autenticar/cadastro")
+async def cadastrarProfessor(dadosForm: Professor):
     with Session(engine) as sessao:
         novo = professores(
             nome_prof=dadosForm.nomeProf,
@@ -20,3 +20,20 @@ def cadastrarProfessor(dadosForm: CadastroProfessor):
         sessao.commit()
 
     return {"mensagem": "Professor cadastrado check"}
+
+@Auth_router.post("/autenticar/login")
+async def logarProfessor(dadosForm: Professor):
+    with Session(engine) as sessao:
+        profResult = sessao.execute(
+            select(professores).where(professores.c.nome_prof == dadosForm.nomeProf)).first()
+                    
+        if profResult is None:
+            return {"erro": "Professor não encontrado :("}
+
+        if profResult.senha_prof != dadosForm.senhaProf:
+            return {"erro": "Senha incorreta"}
+            
+        return {"mensagem": "Professor logado com sucesso!"}
+
+# Coloquei o async antes do def pq segundo a Claude é melhor no nosso contexto, já que seriam múltiplas pessoas logando ao mesmo tempo (o que só funciona com o async). 
+# Mantive o prefix por motivos de organização e identificação das rotas. Mas vê o que for melhor aí.
