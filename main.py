@@ -12,3 +12,5 @@ app.include_router(Auth_router)
 #para rodar o codigo, utilize no terminal: python -m uvicorn main:app --reload
 #para ver o site que mostra todas as rotas, use o link gerado pelo uvicorn juntamente com um /docs
 #estou pesquisando sobre a implementação do SQLAlchemy, ele vai orquestrar uma tradução de linguagem Python para linguagem SQL
+
+#Esse é um teste para ver se minha branch funcionakk
