@@ -1,5 +1,4 @@
-from fastapi import APIRouter
-from fastapi.encoders import jsonable_encoder
+from fastapi import APIRouter, HTTPException
 from DB_conn import engine, alunos, professores, mensagens, mensagem_al, select, Session
 from pydantic import BaseModel
 
@@ -34,6 +33,16 @@ async def logarProfessor(dadosForm: Professor):
             return {"erro": "Senha incorreta"}
             
         return {"mensagem": "Professor logado com sucesso!"}
+
+@Auth_router.get("/DeletaAluno/{id}")
+async def DeletaAluno(id: int):
+    with Session(engine) as db:
+        aluno = db.get(alunos, id)
+        if not aluno:
+            raise HTTPException(status_code = 404, detail="aluno não encontrado")
+        db.delete(aluno)
+        db.commit() 
+    return {"mensagem" : "Aluno apagado com sucesso"}
 
 # Coloquei o async antes do def pq segundo a Claude é melhor no nosso contexto, já que seriam múltiplas pessoas logando ao mesmo tempo (o que só funciona com o async). 
 # Mantive o prefix por motivos de organização e identificação das rotas. Mas vê o que for melhor aí.
