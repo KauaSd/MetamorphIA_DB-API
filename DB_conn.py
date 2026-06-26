@@ -1,5 +1,6 @@
 from sqlalchemy import create_engine, select, Column, Integer, String, ForeignKey, Date, Table
 from sqlalchemy.orm import declarative_base, relationship, Session
+from sqlalchemy.exc import IntegrityError, OperationalError
 engine = create_engine('postgresql+psycopg2://postgres:123@localhost:5432/Usuarios_DB')
 
 base = declarative_base()
