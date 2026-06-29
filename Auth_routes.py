@@ -8,7 +8,7 @@ class Professor(BaseModel):
     nomeProf: str
     senhaProf: str
 
-@Auth_router.post("/autenticar/cadastro")
+@Auth_router.post("/cadastro")
 async def cadastrarProfessor(dadosForm: Professor):
     try:
         with Session(engine) as sessao:
@@ -21,14 +21,13 @@ async def cadastrarProfessor(dadosForm: Professor):
 
         return {"mensagem": "Professor cadastrado check"}
     except IntegrityError as e:
-        sessao.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Erro: Este professor já está cadastrado ou dados obrigatórios estão ausentes."
         )
     except OperationalError as e:
         raise HTTPException(
-            status_code=status.HTTP_503_CONFLICT,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Erro: Banco de dados indisponivel"
         )
     except Exception as e:
@@ -38,7 +37,7 @@ async def cadastrarProfessor(dadosForm: Professor):
         )
 
 
-@Auth_router.post("/autenticar/login")
+@Auth_router.post("/login")
 async def logarProfessor(dadosForm: Professor):
     try:
         with Session(engine) as sessao:
