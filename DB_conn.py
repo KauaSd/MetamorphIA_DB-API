@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, select, Column, Integer, String, ForeignKey, Date, Table
+from sqlalchemy import create_engine, select, Column, Integer, String, ForeignKey, Date, Table, Boolean
 from sqlalchemy.orm import declarative_base, relationship, Session
 from sqlalchemy.exc import IntegrityError, OperationalError
 engine = create_engine('postgresql+psycopg2://postgres:123@localhost:5432/Usuarios_DB')
@@ -15,6 +15,10 @@ class alunos(base):
     id_aluno = Column(Integer, primary_key=True)
     nome_aluno = Column(String)
     neurodiv_aluno = Column(String)
+    serie_aluno = Column(String)
+    diag_aluno = Column(Boolean)
+    desc_aluno = Column(String)
+    idade_aluno= Column(Integer)
     mensagens_rel = relationship("mensagens", secondary=mensagem_al, back_populates="alunos_rel")
 class professores(base):
     __tablename__='professores'
