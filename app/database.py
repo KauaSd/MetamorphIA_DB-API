@@ -10,9 +10,15 @@ mensagem_al = Table(
     Column('id_aluno', Integer, ForeignKey('alunos.id_aluno'), primary_key=True),
     Column('id_mensagem', Integer, ForeignKey('mensagens.id_mensagem'), primary_key=True)
 )
+class professores(base):
+    __tablename__='professores'
+    id_prof =Column(Integer, primary_key=True)
+    nome_prof = Column(String)
+    senha_prof = Column(String)
 class alunos(base):
     __tablename__='alunos'
     id_aluno = Column(Integer, primary_key=True)
+    id_prof = Column(Integer,ForeignKey(professores.id_prof))
     nome_aluno = Column(String)
     neurodiv_aluno = Column(String)
     serie_aluno = Column(String)
@@ -20,11 +26,7 @@ class alunos(base):
     desc_aluno = Column(String)
     idade_aluno= Column(Integer)
     mensagens_rel = relationship("mensagens", secondary=mensagem_al, back_populates="alunos_rel")
-class professores(base):
-    __tablename__='professores'
-    id_prof =Column(Integer, primary_key=True)
-    nome_prof = Column(String)
-    senha_prof = Column(String)
+
 class mensagens(base):
     __tablename__='mensagens'
     id_mensagem = Column(Integer,primary_key=True)
@@ -33,7 +35,12 @@ class mensagens(base):
     anexo_mensagem = Column(Integer)
     alunos_rel = relationship("alunos", secondary=mensagem_al, back_populates="mensagens_rel")
 
-
+def pegar_bd():
+    sessao = Session(engine)
+    try:
+        yield sessao
+    finally:
+        sessao.close
 if __name__=='__main__':
     with engine.connect() as conn:
         stmt=select(alunos).where(alunos.neurodiv_aluno=='TDAH')
