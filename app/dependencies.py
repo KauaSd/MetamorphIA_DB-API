@@ -22,12 +22,15 @@ async def pegar_professor_logado(
     )
     try:
         payload = jwt.decode(token, security.SECRET_KEY, algorithms=[security.ALGORITHM])
-        nome_prof = payload.get("sub")
-        if nome_prof is None:
-                raise credentials_exception
-    except InvalidTokenError:
+        id = payload.get("sub")
+        if id is None:
+            print(professor, id)
+            raise credentials_exception
+    except InvalidTokenError as e:
+        print(e)
         raise credentials_exception
-    professor = users.pegar_usuario_por_nome(sessao, nome_prof)
+    professor = users.pegar_usuario_por_id(sessao, str(id))
     if professor is None:
+        print(professor)
         raise credentials_exception
-    return professor
+    return professor 

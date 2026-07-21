@@ -35,8 +35,6 @@ async def RecebeAluno(form: Aluno, sessao:Session = Depends(pegar_bd), professor
                 id_prof = professor_logado.id_prof,
                 nome_aluno=form.nome,
                 neurodiv_aluno=form.neurodivergencia,
-                serie_aluno = form.serie,
-                diag_aluno = form.diagnosticado,
                 desc_aluno = form.descricao,
                 idade_aluno = form.idade
             )
@@ -57,6 +55,7 @@ async def RecebeAluno(form: Aluno, sessao:Session = Depends(pegar_bd), professor
             detail="Erro: Banco de dados indisponivel"
         )
     except Exception as e:
+        print(e)
         sessao.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -74,6 +73,7 @@ async def consultaaluno(sessao:Session = Depends(pegar_bd), professor_logado: pr
             detail="Erro: Banco de dados indisponivel"
         )
     except Exception as e:
+        print(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erro interno"

@@ -4,21 +4,21 @@ from typing import Annotated
 class LoginForm:
     def __init__(
         self,
-        nomeProf: Annotated[str, Form()],
+        indentificador: Annotated[str, Form()],
         senhaProf: Annotated[str, Form()],
     ):
-        self.nomeProf = nomeProf
+        self.indentificador = indentificador
         self.senhaProf = senhaProf
 class Professor(BaseModel):
     nomeProf: str
+    emailprof: str
+    numprof : str
     senhaProf: str
     
 class Aluno(BaseModel):
     nome: str
     idade: int
-    serie: str
     neurodivergencia: str
-    diagnosticado: bool
     descricao: str
 class Alunoschema(BaseModel):
     id_aluno: int

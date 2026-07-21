@@ -13,6 +13,8 @@ mensagem_al = Table(
 class professores(base):
     __tablename__='professores'
     id_prof =Column(Integer, primary_key=True)
+    email_prof = Column (String, unique= True , index=True, nullable=False)
+    num_prof = Column (String, unique= True , index=True, nullable=False)
     nome_prof = Column(String)
     senha_prof = Column(String)
 class alunos(base):
@@ -21,8 +23,6 @@ class alunos(base):
     id_prof = Column(Integer,ForeignKey(professores.id_prof))
     nome_aluno = Column(String)
     neurodiv_aluno = Column(String)
-    serie_aluno = Column(String)
-    diag_aluno = Column(Boolean)
     desc_aluno = Column(String)
     idade_aluno= Column(Integer)
     mensagens_rel = relationship("mensagens", secondary=mensagem_al, back_populates="alunos_rel")
