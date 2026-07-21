@@ -1,14 +1,33 @@
 from database import professores, Session, IntegrityError, OperationalError
 from fastapi import HTTPException, status
+import re
 from schemas import schemas
 import security
 
-def pegar_usuario_por_nome(sessao: Session, nomeProf:str):
-    return sessao.query(professores).filter(professores.nome_prof == nomeProf).first()
-def cria_prof(sessao: Session, dados: schemas.Professor):
+def is_email(txt: str) -> bool:
+    return bool (re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", txt))
+def pegar_usuario_por_id(
+        sessao: Session,
+        id: int
+):
+    return sessao.query(professores).filter(professores.id_prof == id).first()
+def pegar_usuario_por_indentificador(
+    sessao: Session,
+    indentificador:str
+    ):
+    if is_email(indentificador):
+        return sessao.query(professores).filter(professores.email_prof == indentificador).first()
+    else:
+        return sessao.query(professores).filter(professores.num_prof == indentificador).first()
+def cria_prof(
+    sessao: Session, 
+    dados: schemas.Professor
+    ):
     try:
         professor=professores(
-                    nome_prof=dados.nomeProf,
+                    email_prof=dados.emailprof,
+                    num_prof = dados.numprof,
+                    nome_prof = dados.nomeProf,
                     senha_prof=security.cria_hash_senha(dados.senhaProf)
         )
         sessao.add(professor)
@@ -33,8 +52,11 @@ def cria_prof(sessao: Session, dados: schemas.Professor):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erro interno"
         )
-def autenticar_prof(sessao: Session, dados: schemas.LoginForm):
-    usuario = pegar_usuario_por_nome(sessao, dados.nomeProf)
+def autenticar_prof(
+    sessao: Session,
+    dados: schemas.LoginForm
+    ):
+    usuario = pegar_usuario_por_indentificador(sessao, dados.indentificador)
     if not usuario:
         security.verifica_senha(dados.senhaProf, security.DUMMY_HASH)
         return False
