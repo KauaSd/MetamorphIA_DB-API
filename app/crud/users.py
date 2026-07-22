@@ -1,16 +1,46 @@
-from database import professores, Session, IntegrityError, OperationalError
+from database import professores, Session, IntegrityError, OperationalError, Tipo2FA, user2famethods
 from fastapi import HTTPException, status
 import re
+from datetime import datetime, timezone
 from schemas import schemas
 import security
 
-def is_email(txt: str) -> bool:
+def pegar_2fa_prof(
+    sessao: Session,
+    id: int
+    
+):
+    resultado = sessao.query(user2famethods).filter(user2famethods.id_prof == id).first()
+
+    if resultado is not None:
+            return resultado
+    else:
+        prof_existe = sessao.query(professores.id_prof).filter(professores.id_prof == id).scalar()
+        if not prof_existe:
+            raise HTTPException(status_code=404, detail='professor não encontado')
+        mfa = user2famethods(
+        id_prof=id,
+        tipo=Tipo2FA.NONE,
+        secret=None,
+        usa_verificacao=False
+    )
+    sessao.add(mfa)
+    sessao.commit()
+    sessao.refresh(mfa)
+    resultado = sessao.query(user2famethods).filter(user2famethods.id_prof == id).first()
+    return resultado
+
+def is_email(
+    txt: str
+    ) -> bool:
     return bool (re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", txt))
+
 def pegar_usuario_por_id(
         sessao: Session,
         id: int
 ):
     return sessao.query(professores).filter(professores.id_prof == id).first()
+
 def pegar_usuario_por_indentificador(
     sessao: Session,
     indentificador:str
@@ -31,6 +61,16 @@ def cria_prof(
                     senha_prof=security.cria_hash_senha(dados.senhaProf)
         )
         sessao.add(professor)
+        sessao.flush()
+
+        mfa = user2famethods(
+            tipo = Tipo2FA.NONE,
+            secret = None,
+            usa_verificacao = False,
+            data_criacao = datetime.now(timezone.utc),
+            id_prof = professor.id_prof
+        )
+        sessao.add(mfa)
         sessao.commit()
         sessao.refresh(professor)
         return professor
@@ -48,6 +88,7 @@ def cria_prof(
         )
     except Exception as e:
         sessao.rollback()
+        print(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erro interno"
@@ -63,3 +104,39 @@ def autenticar_prof(
     if not security.verifica_senha(dados.senhaProf, usuario.senha_prof):
         return False
     return usuario
+
+def troca_user2famethods(
+        sessao: Session,
+        id_prof: int,
+        tipo: Tipo2FA,
+        email: str
+):
+    mfa = sessao.query(user2famethods).filter(user2famethods.id_prof == id_prof).first()
+
+    if tipo == Tipo2FA.TOTP:
+        secret = security.gerar_secret_totp()
+        mfa.secret = secret
+        mfa.tipo = tipo
+        mfa.usa_verificacao = False
+        sessao.commit()
+        sessao.refresh(mfa)
+        qr_code = security.gerar_qrcode_totp(secret, email)
+
+        return {"qr_code": qr_code, 'totp' : True}
+    mfa.tipo = tipo
+    mfa.secret = None
+    mfa.usa_verificacao = False if tipo == Tipo2FA.NONE else True
+    sessao.commit()
+    sessao.refresh(mfa)
+    return {"message": "Ativação completa", 'totp' : False}
+
+def fn_confirma_totp(
+        sessao: Session,
+        id_prof: int
+):
+    mfa = sessao.query(user2famethods).filter(user2famethods.id_prof == id_prof).first()
+    if mfa:
+        mfa.usa_verificacao = True
+        sessao.commit()
+        sessao.refresh(mfa)
+    return mfa

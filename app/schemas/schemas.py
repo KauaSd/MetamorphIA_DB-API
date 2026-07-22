@@ -18,14 +18,14 @@ class Professor(BaseModel):
 class Aluno(BaseModel):
     nome: str
     idade: int
+    turma: int
     neurodivergencia: str
     descricao: str
 class Alunoschema(BaseModel):
     id_aluno: int
     nome_aluno: str
     neurodiv_aluno: str
-    serie_aluno: str
-    diag_aluno: bool
+    id_turma: int
     desc_aluno: str
     idade_aluno: int
 
@@ -34,3 +34,5 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
+class Validar2FARequest(BaseModel):
+    codigo: str
