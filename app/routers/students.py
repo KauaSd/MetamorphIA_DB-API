@@ -6,7 +6,7 @@ from dependencies import pegar_professor_logado
 Student_router = APIRouter(prefix="/Alunos", tags=["Alunos"])
 
 @Student_router.delete("/DeletaAluno/{id}")
-async def DeletaAluno(id: int, sessao:Session = Depends(pegar_bd), professor_logado: professores = Depends(pegar_professor_logado)):
+def DeletaAluno(id: int, sessao:Session = Depends(pegar_bd), professor_logado: professores = Depends(pegar_professor_logado)):
     try:
         aluno = sessao.get(alunos, id)
         if not aluno:
@@ -29,10 +29,11 @@ async def DeletaAluno(id: int, sessao:Session = Depends(pegar_bd), professor_log
             detail="Erro interno")
 
 @Student_router.post("/RecebeAluno", status_code=status.HTTP_201_CREATED)
-async def RecebeAluno(form: Aluno, sessao:Session = Depends(pegar_bd), professor_logado: professores = Depends(pegar_professor_logado)):
+def RecebeAluno(form: Aluno, sessao:Session = Depends(pegar_bd), professor_logado: professores = Depends(pegar_professor_logado)):
     try:
         new = alunos(
                 id_prof = professor_logado.id_prof,
+                id_turma= form.turma,
                 nome_aluno=form.nome,
                 neurodiv_aluno=form.neurodivergencia,
                 desc_aluno = form.descricao,
@@ -43,6 +44,7 @@ async def RecebeAluno(form: Aluno, sessao:Session = Depends(pegar_bd), professor
         sessao.refresh(new)
         return {"mensagem": "Aluno cadastrado com sucesso"}
     except IntegrityError as e:
+        print(e)
         sessao.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -62,11 +64,11 @@ async def RecebeAluno(form: Aluno, sessao:Session = Depends(pegar_bd), professor
             detail="Erro interno"
         )
 @Student_router.get("/consultaaluno", response_model=List[Alunoschema])
-async def consultaaluno(sessao:Session = Depends(pegar_bd), professor_logado: professores = Depends(pegar_professor_logado)):
+def consultaaluno(sessao:Session = Depends(pegar_bd), professor_logado: professores = Depends(pegar_professor_logado)):
     try:
-            query= select(alunos).where(alunos.id_prof==professor_logado.id_prof)
-            result = sessao.execute(query).scalars().all()
-            return result
+        query= select(alunos).where(alunos.id_prof==professor_logado.id_prof)
+        result = sessao.execute(query).scalars().all()
+        return result
     except OperationalError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
