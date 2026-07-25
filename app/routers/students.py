@@ -1,82 +1,109 @@
-from fastapi import APIRouter, HTTPException, status, Depends
-from database import alunos, select, Session, IntegrityError, OperationalError,pegar_bd, professores
 from typing import List
-from schemas.schemas import Aluno, Alunoschema
+
+from database import (
+    IntegrityError,
+    OperationalError,
+    Session,
+    alunos,
+    pegar_bd,
+    professores,
+    select,
+)
 from dependencies import pegar_professor_logado
+from fastapi import APIRouter, Depends, HTTPException, status
+from schemas.schemas import Aluno, Alunoschema
+
 Student_router = APIRouter(prefix="/Alunos", tags=["Alunos"])
 
+
 @Student_router.delete("/DeletaAluno/{id}")
-def DeletaAluno(id: int, sessao:Session = Depends(pegar_bd), professor_logado: professores = Depends(pegar_professor_logado)):
+def DeletaAluno(
+    id: int,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
     try:
         aluno = sessao.get(alunos, id)
         if not aluno:
             raise HTTPException(status_code=404, detail="aluno não encontrado")
         if aluno.id_prof != professor_logado.id_prof:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail= "Você não tem permissão para apagar este aluno")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Você não tem permissão para apagar este aluno",
+            )
         sessao.delete(aluno)
         sessao.commit()
-        return {"mensagem" : "Aluno apagado com sucesso"}
+        return {"mensagem": "Aluno apagado com sucesso"}
     except HTTPException:
         raise
-    except OperationalError:
+    except OperationalError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Erro: Banco de dados indisponivel"
+            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
         )
-    except Exception:
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erro interno")
+            detail=f"Erro interno. Erro: {e}",
+        )
+
 
 @Student_router.post("/RecebeAluno", status_code=status.HTTP_201_CREATED)
-def RecebeAluno(form: Aluno, sessao:Session = Depends(pegar_bd), professor_logado: professores = Depends(pegar_professor_logado)):
+def RecebeAluno(
+    form: Aluno,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
     try:
         new = alunos(
-                id_prof = professor_logado.id_prof,
-                id_turma= form.turma,
-                nome_aluno=form.nome,
-                neurodiv_aluno=form.neurodivergencia,
-                desc_aluno = form.descricao,
-                idade_aluno = form.idade
-            )
+            id_prof=professor_logado.id_prof,
+            id_turma=form.turma,
+            nome_aluno=form.nome,
+            neurodiv_aluno=form.neurodivergencia,
+            desc_aluno=form.descricao,
+            idade_aluno=form.idade,
+        )
         sessao.add(new)
         sessao.commit()
         sessao.refresh(new)
         return {"mensagem": "Aluno cadastrado com sucesso"}
     except IntegrityError as e:
-        print(e)
         sessao.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Erro: aluno já cadastrado ou dados obrigatórios ausentes"
+            detail=f"aluno já cadastrado ou dados obrigatórios ausentes. Erro: {e}",
         )
     except OperationalError as e:
         sessao.rollback()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Erro: Banco de dados indisponivel"
+            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
         )
     except Exception as e:
         print(e)
         sessao.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erro interno"
+            detail=f"Erro interno. Erro: {e}",
         )
+
+
 @Student_router.get("/consultaaluno", response_model=List[Alunoschema])
-def consultaaluno(sessao:Session = Depends(pegar_bd), professor_logado: professores = Depends(pegar_professor_logado)):
+def consultaaluno(
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
     try:
-        query= select(alunos).where(alunos.id_prof==professor_logado.id_prof)
+        query = select(alunos).where(alunos.id_prof == professor_logado.id_prof)
         result = sessao.execute(query).scalars().all()
         return result
     except OperationalError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Erro: Banco de dados indisponivel"
+            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
         )
     except Exception as e:
-        print(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erro interno"
+            detail=f"Erro interno. Erro: {e}",
         )
