@@ -50,6 +50,12 @@ class Alunoschema(BaseModel):
 
     model_config = {"from_attributes": True}
 
+class Turma(BaseModel):
+	nome: str
+
+class TurmaSchema(BaseModel):
+	id_turma: int
+
 
 class Token(BaseModel):
     access_token: str
@@ -64,3 +70,7 @@ class Tipo2FA(str, Enum):
     TOTP = "totp"
     EMAIL = "email"
     SMS = "sms"
+
+
+class PesquisaAluno(BaseModel):
+    nome:str

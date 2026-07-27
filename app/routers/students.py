@@ -11,99 +11,34 @@ from database import (
 )
 from dependencies import pegar_professor_logado
 from fastapi import APIRouter, Depends, HTTPException, status
-from schemas.schemas import Aluno, Alunoschema
+from schemas.schemas import Aluno, Alunoschema, PesquisaAluno
+from services.students import ConsultaAluno, RecebeAluno, DeletaAluno
 
 Student_router = APIRouter(prefix="/Alunos", tags=["Alunos"])
 
 
 @Student_router.delete("/DeletaAluno/{id}")
-def DeletaAluno(
-    id: int,
+def Deletar(
+    id_aluno: int,
     sessao: Session = Depends(pegar_bd),
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
-    try:
-        aluno = sessao.get(alunos, id)
-        if not aluno:
-            raise HTTPException(status_code=404, detail="aluno não encontrado")
-        if aluno.id_prof != professor_logado.id_prof:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Você não tem permissão para apagar este aluno",
-            )
-        sessao.delete(aluno)
-        sessao.commit()
-        return {"mensagem": "Aluno apagado com sucesso"}
-    except HTTPException:
-        raise
-    except OperationalError as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro: {e}",
-        )
+    return DeletaAluno(id_aluno, sessao, professor_logado.id_prof)
 
 
 @Student_router.post("/RecebeAluno", status_code=status.HTTP_201_CREATED)
-def RecebeAluno(
+def Receber(
     form: Aluno,
     sessao: Session = Depends(pegar_bd),
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
-    try:
-        new = alunos(
-            id_prof=professor_logado.id_prof,
-            id_turma=form.turma,
-            nome_aluno=form.nome,
-            neurodiv_aluno=form.neurodivergencia,
-            desc_aluno=form.descricao,
-            idade_aluno=form.idade,
-        )
-        sessao.add(new)
-        sessao.commit()
-        sessao.refresh(new)
-        return {"mensagem": "Aluno cadastrado com sucesso"}
-    except IntegrityError as e:
-        sessao.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"aluno já cadastrado ou dados obrigatórios ausentes. Erro: {e}",
-        )
-    except OperationalError as e:
-        sessao.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
-        )
-    except Exception as e:
-        print(e)
-        sessao.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro: {e}",
-        )
+    return RecebeAluno(form, sessao, professor_logado.id_prof)
 
 
-@Student_router.get("/consultaaluno", response_model=List[Alunoschema])
-def consultaaluno(
+@Student_router.post("/ConsultaAluno", response_model=List[Alunoschema])
+def Consultar(
+    pesquisaAluno: PesquisaAluno,
     sessao: Session = Depends(pegar_bd),
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
-    try:
-        query = select(alunos).where(alunos.id_prof == professor_logado.id_prof)
-        result = sessao.execute(query).scalars().all()
-        return result
-    except OperationalError as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro: {e}",
-        )
+    return ConsultaAluno(pesquisaAluno, sessao, professor_logado.id_prof)

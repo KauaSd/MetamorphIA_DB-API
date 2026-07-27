@@ -12,10 +12,12 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 from routers.ai import AI_router
 from routers.auth import Auth_router
 from routers.students import Student_router
+from routers.turmas import Turma_router
 
 app.include_router(AI_router)
 app.include_router(Auth_router)
 app.include_router(Student_router)
+app.include_router(Turma_router)
 
 #utilize no terminal: pip install fastapi uvicorn python-dotenv
 #para rodar o codigo, utilize no terminal: python -m uvicorn main:app --reload
