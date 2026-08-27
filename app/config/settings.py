@@ -18,6 +18,7 @@ class Settings:
     TWILIO_AUTH_TOKEN: str = os.environ["TWILIO_AUTH_TOKEN"]
     TWILIO_PHONE_NUMBER: str = os.environ["TWILIO_PHONE_NUMBER"]
     TWILIO_CONTENT_SID: str = os.environ["TWILIO_CONTENT_SID"]
+    BD_ACCESS: str = os.environ["BD_ACCESS"]
 
 settings = Settings()
 

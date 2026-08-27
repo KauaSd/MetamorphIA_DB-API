@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-
+from config.settings import settings
 from schemas.schemas import Tipo2FA
 from sqlalchemy import (
     Boolean,
@@ -12,12 +12,13 @@ from sqlalchemy import (
     Table,
     create_engine,
     select,
+    delete,
 )
 from sqlalchemy import Enum as sqlenum
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, declarative_base, relationship
 
-engine = create_engine("postgresql+psycopg2://postgres:123@localhost:5432/Usuarios_DB")
+engine = create_engine(settings.BD_ACCESS)
 
 base = declarative_base()
 

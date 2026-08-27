@@ -11,7 +11,7 @@ from database import (
 )
 from dependencies import pegar_professor_logado
 from fastapi import APIRouter, Depends, HTTPException, status
-from schemas.schemas import Aluno, Alunoschema, PesquisaAluno
+from schemas.schemas import Aluno, Alunoschema, PesquisaAluno, EditaAlunoSchema
 
 
 def DeletaAluno(
@@ -82,7 +82,7 @@ def RecebeAluno(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro interno. Erro: {e}",
         )
-
+    
 
 def ConsultaAluno(
     pesquisaAluno: PesquisaAluno,
@@ -93,6 +93,46 @@ def ConsultaAluno(
         query = select(alunos).where(alunos.id_prof == id_prof, alunos.nome_aluno.icontains(pesquisaAluno.nome))
         result = sessao.execute(query).scalars().all()
         return result
+    except OperationalError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro interno. Erro: {e}",
+        )
+    
+def EditaAluno(
+    alunoed: EditaAlunoSchema,
+    form: Aluno,
+    sessao: Session,
+    id_prof: int
+):
+    stmt = select(alunos).where(alunos.id_prof == id_prof, alunos.id_aluno == alunoed.id)
+    aluno = sessao.execute(stmt).scalar_one_or_none()
+    if not aluno:
+        raise HTTPException(status_code=404, detail="Aluno não encontrado")
+
+    try:
+            if aluno.nome_aluno!=form.nome:
+                aluno.nome_aluno=form.nome
+            if aluno.idade_aluno!=form.idade:
+                aluno.idade_aluno=form.idade
+            if aluno.id_turma!=form.turma:
+                aluno.id_turma=form.turma
+            if aluno.neurodiv_aluno!=form.neurodivergencia:
+                aluno.neurodiv_aluno=form.neurodivergencia
+            if aluno.desc_aluno!=form.descricao:
+                aluno.desc_aluno=form.descricao
+
+
+            sessao.commit()
+            sessao.refresh(aluno)
+
+            return {"mensagem": "Aluno editado com sucesso"}
+
     except OperationalError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

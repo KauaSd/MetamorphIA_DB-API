@@ -1,0 +1,13 @@
+fastapi
+httpx
+pwdlib[argon2]
+psycopg2-binary
+PyJWT
+pyotp
+python-dotenv
+python-multipart
+qrcode[pil]
+slowapi
+SQLAlchemy
+twilio
+uvicorn[standard]

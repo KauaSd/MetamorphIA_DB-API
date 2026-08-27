@@ -11,8 +11,8 @@ from database import (
 )
 from dependencies import pegar_professor_logado
 from fastapi import APIRouter, Depends, HTTPException, status
-from schemas.schemas import Aluno, Alunoschema, PesquisaAluno
-from services.students import ConsultaAluno, RecebeAluno, DeletaAluno
+from schemas.schemas import Aluno, Alunoschema, EditaAlunoSchema, PesquisaAluno
+from services.students import ConsultaAluno, RecebeAluno, DeletaAluno, EditaAluno
 
 Student_router = APIRouter(prefix="/Alunos", tags=["Alunos"])
 
@@ -42,3 +42,12 @@ def Consultar(
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
     return ConsultaAluno(pesquisaAluno, sessao, professor_logado.id_prof)
+
+@Student_router.put("/EditaAluno")
+def Editar(
+    alunoed: EditaAlunoSchema,
+    form: Aluno,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    return EditaAluno(alunoed, form, sessao, professor_logado.id_prof)
