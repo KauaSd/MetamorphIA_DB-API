@@ -8,14 +8,17 @@ from dependencies import pegar_professor_logado, pegar_usuario_pendente_2fa
 from datetime import datetime,timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from main import limiter
-from schemas.schemas import LoginForm, Professor, Token, Validar2FARequest
+from schemas.schemas import LoginForm, Professor, Token, Validar2FARequest, Professoredita
 from config.settings import settings
 
 Auth_router = APIRouter(prefix="/autenticar", tags=["autenticar"])
 
 
 @Auth_router.post("/cadastro")
-async def cadastrarProfessor(dadosForm: Professor, sessao: Session = Depends(pegar_bd)):
+async def cadastrarProfessor(
+    dadosForm: Professor, 
+    sessao: Session = Depends(pegar_bd)
+    ):
     users.cria_prof(sessao, dadosForm)
     return {"mensagem": "Professor cadastrado"}
 
@@ -74,3 +77,22 @@ def token(
     return fnmfa.envia_token(
         sessao, professor["id_prof"]
     )
+
+
+@Auth_router.delete("/deletaProfessor/{id_professor}")
+def deletar(
+    id_professor: int,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    return users.deletaProfessor(
+        sessao, id_professor, professor_logado.id_prof)
+
+@Auth_router.put("/EditaProfessor/")
+def editar(
+    dados: Professoredita,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    return users.EditaProfessor(
+        sessao, professor_logado, dados)

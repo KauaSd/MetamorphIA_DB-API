@@ -9,14 +9,19 @@ from database import (
     IntegrityError,
     OperationalError,
     Session,
+    alunos,
     professores,
+    turmas,
     user2famethods,
+    delete
 )
 from fastapi import HTTPException, status
-from schemas.schemas import Professor, LoginForm, Tipo2FA, Token
+from schemas.schemas import Professor, LoginForm, Tipo2FA, Token, Professoredita
 
 
-def cria_prof(sessao: Session, dados: Professor):
+def cria_prof(
+        sessao: Session, 
+        dados: Professor):
     try:
         professor = professores(
             email_prof=dados.emailprof,
@@ -58,7 +63,9 @@ def cria_prof(sessao: Session, dados: Professor):
         )
 
 
-def autenticar_prof(sessao: Session, dados: LoginForm):
+def autenticar_prof(
+        sessao: Session, 
+        dados: LoginForm):
     usuario = dependencies.pegar_usuario_por_indentificador(sessao, dados.indentificador)
     if not usuario:
         security.verifica_senha(dados.senhaProf, DUMMY_HASH)
@@ -66,6 +73,7 @@ def autenticar_prof(sessao: Session, dados: LoginForm):
     if not security.verifica_senha(dados.senhaProf, usuario.senha_prof):
         return False
     return usuario
+
 
 def logarProfessor(
     dados: LoginForm,
@@ -90,6 +98,7 @@ def logarProfessor(
             detail="Usuário ou senha incorreta",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    
     mfa = fnmfa.pegar_2fa_prof(sessao, usuario.id_prof)
     if not mfa.usa_verificacao:
         print(mfa.tipo)
@@ -112,7 +121,12 @@ def logarProfessor(
         access_token=access_token, token_type="bearer", requires_2fa=mfa.usa_verificacao
     )
 
-def troca_user2famethods(sessao: Session, id_prof: int, tipo: Tipo2FA, email: str):
+
+def troca_user2famethods(
+        sessao: Session, 
+        id_prof: int, 
+        tipo: Tipo2FA, 
+        email: str):
     mfa = sessao.query(user2famethods).filter(user2famethods.id_prof == id_prof).first()
 
     if tipo == Tipo2FA.TOTP:
@@ -140,3 +154,72 @@ def fn_confirma_totp(sessao: Session, id_prof: int):
         sessao.commit()
         sessao.refresh(mfa)
     return mfa
+
+
+def deletaProfessor(
+    sessao: Session ,
+    id_prof: int,
+    professor_logado: int,
+):
+    try:
+        professor = sessao.get(professores, id_prof)
+        if not professor:
+            raise HTTPException(status_code=404, detail="professor não encontrado")
+        if professor.id_prof != professor_logado:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Você não tem permissão para apagar este professor",
+            )
+
+        sessao.execute(delete(turmas).where(turmas.id_prof == id_prof))
+        sessao.execute(delete(alunos).where(alunos.id_prof == id_prof))
+        sessao.delete(professor)
+        sessao.commit()
+        return {"mensagem": "Professor apagado com sucesso"}
+    except HTTPException:
+        raise
+    except OperationalError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro interno. Erro: {e}",
+        )
+
+
+def EditaProfessor(
+    sessao: Session,
+    professor_logado: professores,
+    dados: Professoredita
+):
+    professor = sessao.get(professores, professor_logado.id_prof)
+    if not professor:
+        raise HTTPException(status_code=404, detail="professor não encontrado")
+
+    try:
+
+        if dados.emailprof != professor.email_prof:
+            professor.email_prof = dados.emailprof
+        if  dados.numprof != professor.num_prof:
+            professor.num_prof = dados.numprof
+        if  dados.nomeProf != professor.nome_prof:
+            professor.nome_prof = dados.nomeProf
+
+        sessao.commit()
+        sessao.refresh(professor)
+
+        return {"mensagem": "Professor editado com sucesso"}
+
+    except OperationalError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro interno. Erro: {e}",
+        )

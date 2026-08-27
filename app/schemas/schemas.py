@@ -74,3 +74,11 @@ class Tipo2FA(str, Enum):
 
 class PesquisaAluno(BaseModel):
     nome:str
+
+class Professoredita(BaseModel):
+    nomeProf: str
+    emailprof: str
+    numprof: str
+
+class EditaAlunoSchema(BaseModel):
+    id:int 
