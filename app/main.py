@@ -1,25 +1,29 @@
+from pathlib import Path
+import sys
+
+_APP_DIR = str(Path(__file__).resolve().parent)
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
 from fastapi import FastAPI
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 limiter = Limiter(key_func=get_remote_address)
 
-app=FastAPI()
+app = FastAPI()
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 from routers.ai import AI_router
 from routers.auth import Auth_router
+from routers.planos import Planos_router
 from routers.students import Student_router
 from routers.turmas import Turma_router
 
 app.include_router(AI_router)
 app.include_router(Auth_router)
+app.include_router(Planos_router)
 app.include_router(Student_router)
 app.include_router(Turma_router)
-
-#utilize no terminal: pip install fastapi uvicorn python-dotenv
-#para rodar o codigo, utilize no terminal: python -m uvicorn main:app --reload
-#para ver o site que mostra todas as rotas, use o link gerado pelo uvicorn juntamente com um /docs
-#estou pesquisando sobre a implementação do SQLAlchemy, ele vai orquestrar uma tradução de linguagem Python para linguagem SQL

@@ -1,9 +1,13 @@
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pwdlib import PasswordHash
 
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 load_dotenv()
+
+
 class Settings:
     SECRET_KEY: str = os.environ["SECRET_KEY"]
     # algoritimo do hash - declara o tipo de algoritomo que sera feito o hash
@@ -19,6 +23,7 @@ class Settings:
     TWILIO_PHONE_NUMBER: str = os.environ["TWILIO_PHONE_NUMBER"]
     TWILIO_CONTENT_SID: str = os.environ["TWILIO_CONTENT_SID"]
     BD_ACCESS: str = os.environ["BD_ACCESS"]
+
 
 settings = Settings()
 

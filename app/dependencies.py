@@ -81,7 +81,7 @@ def pegar_professor_logado(
     except InvalidTokenError as e:
         print(e)
         raise credentials_exception
-    professor = pegar_usuario_por_id(sessao, id_prof)
+    professor = pegar_usuario_por_id(sessao, int(id_prof))
     if professor is None:
         print(professor)
         raise credentials_exception

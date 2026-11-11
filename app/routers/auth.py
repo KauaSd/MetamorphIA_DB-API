@@ -1,26 +1,32 @@
-from datetime import timedelta
 from typing import Annotated
-import services.mfa as fnmfa
-import services.users as users
-import security
+from config.settings import settings
 from database import OperationalError, Session, Tipo2FA, pegar_bd, professores
 from dependencies import pegar_professor_logado, pegar_usuario_pendente_2fa
-from datetime import datetime,timezone
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from main import limiter
-from schemas.schemas import LoginForm, Professor, Token, Validar2FARequest, Professoredita
-from config.settings import settings
+from fastapi import APIRouter, Depends, Request
+from schemas.schemas import (
+    GoogleAuthRequest,
+    LoginForm,
+    Professor,
+    Professoredita,
+    Token,
+    Validar2FARequest,
+)
+import services.mfa as fnmfa
+import services.users as users
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address)
 
 Auth_router = APIRouter(prefix="/autenticar", tags=["autenticar"])
 
 
 @Auth_router.post("/cadastro")
 async def cadastrarProfessor(
-    dadosForm: Professor, 
-    sessao: Session = Depends(pegar_bd)
-    ):
-    users.cria_prof(sessao, dadosForm)
-    return {"mensagem": "Professor cadastrado"}
+    dadosForm: Professor,
+    sessao: Session = Depends(pegar_bd),
+):
+    return users.cria_prof(sessao, dadosForm)
 
 
 @Auth_router.post("/login")
@@ -30,9 +36,15 @@ def logar(
     dados: Annotated[LoginForm, Depends()],
     sessao: Annotated[Session, Depends(pegar_bd)],
 ) -> Token:
-    return users.logarProfessor(
-        dados, sessao
-    )
+    return users.logarProfessor(dados, sessao)
+
+
+@Auth_router.post("/google")
+def logar_google(
+    dados: GoogleAuthRequest,
+    sessao: Annotated[Session, Depends(pegar_bd)],
+) -> Token:
+    return users.logar_com_google(dados, sessao)
 
 
 @Auth_router.post("/ativar2fa")
@@ -54,9 +66,7 @@ def verificar(
     dados_pendentes: Annotated[dict, Depends(pegar_usuario_pendente_2fa)],
     sessao: Annotated[Session, Depends(pegar_bd)],
 ) -> Token:
-    return fnmfa.verificar2fa(
-        dados, dados_pendentes, sessao
-    )
+    return fnmfa.verificar2fa(dados, dados_pendentes, sessao)
 
 
 @Auth_router.post("/confirma_totp")
@@ -64,19 +74,15 @@ def confirma_totp(
     sessao: Annotated[Session, Depends(pegar_bd)],
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
-    return fnmfa.fn_confirma_totp(
-        sessao, professor_logado.id_prof
-    )
+    return fnmfa.fn_confirma_totp(sessao, professor_logado.id_prof)
 
 
 @Auth_router.post("/envia_token")
 def token(
-    sessao: Annotated [Session, Depends(pegar_bd)],
-    professor: Annotated [dict, Depends(pegar_usuario_pendente_2fa)]
+    sessao: Annotated[Session, Depends(pegar_bd)],
+    professor: Annotated[dict, Depends(pegar_usuario_pendente_2fa)],
 ):
-    return fnmfa.envia_token(
-        sessao, professor["id_prof"]
-    )
+    return fnmfa.envia_token(sessao, professor["id_prof"])
 
 
 @Auth_router.delete("/deletaProfessor/{id_professor}")
@@ -85,8 +91,8 @@ def deletar(
     sessao: Session = Depends(pegar_bd),
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
-    return users.deletaProfessor(
-        sessao, id_professor, professor_logado.id_prof)
+    return users.deletaProfessor(sessao, id_professor, professor_logado.id_prof)
+
 
 @Auth_router.put("/EditaProfessor/")
 def editar(
@@ -94,5 +100,4 @@ def editar(
     sessao: Session = Depends(pegar_bd),
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
-    return users.EditaProfessor(
-        sessao, professor_logado, dados)
+    return users.EditaProfessor(sessao, professor_logado, dados)
