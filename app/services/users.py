@@ -10,7 +10,11 @@ from database import (
     Escola,
     Grupo,
     IntegrityError,
+    Mensagem,
+    Nota_fiscal,
     OperationalError,
+    PasswordResetCode,
+    Pgto,
     Plano,
     Session,
     Turma,
@@ -19,11 +23,14 @@ from database import (
     User_grupo,
     Usuario,
     alunos,
+    chat,
     delete,
     garantir_planos_iniciais,
+    mensagem_al,
     professores,
     select,
     turmas,
+    user2facodes,
     user2famethods,
 )
 import dependencies
@@ -32,6 +39,7 @@ import jwt
 from schemas.schemas import (
     GoogleAuthRequest,
     LoginForm,
+    MicrosoftAuthRequest,
     Professor,
     Professoredita,
     Tipo2FA,
@@ -60,9 +68,9 @@ def provisionar_estrutura_inicial_usuario(
     usuario: Usuario,
     nome_escola_inicial: Optional[str] = None,
 ) -> tuple[Grupo, Escola, Contrato]:
-    """Garante que todo usuário normal tenha desde o início 1 Grupo, 1 Contrato Básico e 1 Escola Básica."""
+    """Garante que todo usuário normal tenha desde o início 1 Grupo, 1 Contrato Normal (free) e 1 Escola Normal."""
     planos = garantir_planos_iniciais(sessao)
-    plano_basico = planos["basico"]
+    plano_normal = planos["normal"]
 
     grupo_existente = sessao.execute(
         select(Grupo).where(Grupo.fk_Usuario_id_usuario == usuario.id_usuario)
@@ -86,10 +94,10 @@ def provisionar_estrutura_inicial_usuario(
         tipo_cont=tipo_cont,
         documento_cont=doc,
         max_qtd_user=1,
-        max_qtd_turmas=plano_basico.max_turmas_por_escola,
-        max_qtd_alunos=plano_basico.max_alunos_por_turma,
-        max_qtd_escolas=plano_basico.max_escolas,
-        fk_Plano_id_plano=plano_basico.id_plano,
+        max_qtd_turmas=plano_normal.max_turmas_por_escola,
+        max_qtd_alunos=plano_normal.max_alunos_por_turma,
+        max_qtd_escolas=plano_normal.max_escolas,
+        fk_Plano_id_plano=plano_normal.id_plano,
         status_contrato="ativo",
     )
     sessao.add(contrato)
@@ -139,8 +147,55 @@ def provisionar_estrutura_inicial_usuario(
     return grupo, escola, contrato
 
 
+def resolver_perfil_e_tela(sessao: Session, usuario: Usuario) -> dict[str, Any]:
+    """Determina o perfil de acesso (professor, admin_escola, admin_rede, admin_sistema) e a tela inicial."""
+    tipo = usuario.tipo_usuario or "normal"
+    escola_adm_id: Optional[int] = None
+
+    if tipo == "adm_sistema":
+        return {
+            "perfil": "admin_sistema",
+            "tela_inicial": "painel_adm_sistema",
+            "escola_adm_id": None,
+        }
+    if tipo == "adm_institucional":
+        return {
+            "perfil": "admin_rede",
+            "tela_inicial": "painel_adm_institucional",
+            "escola_adm_id": None,
+        }
+    if tipo in ("adm_escola", "adm_pro_plus"):
+        planos_map = {p.id_plano: p.nome_plano for p in garantir_planos_iniciais(sessao).values()}
+        vinc_escs = sessao.execute(
+            select(User_esc).where(
+                User_esc.fk_Usuario_id_usuario == usuario.id_usuario,
+                User_esc.papel == "adm",
+            )
+        ).scalars().all()
+        for ve in vinc_escs:
+            esc = sessao.get(Escola, ve.fk_Escola_id_escola)
+            if esc and esc.fk_Contrato_id_cont:
+                cont = sessao.get(Contrato, esc.fk_Contrato_id_cont)
+                if cont and cont.status_contrato == "ativo" and planos_map.get(cont.fk_Plano_id_plano) == "institucional":
+                    escola_adm_id = esc.id_escola
+                    break
+        if escola_adm_id is None and vinc_escs:
+            escola_adm_id = vinc_escs[0].fk_Escola_id_escola
+        return {
+            "perfil": "admin_escola",
+            "tela_inicial": "painel_adm_escola",
+            "escola_adm_id": escola_adm_id,
+        }
+
+    return {
+        "perfil": "professor",
+        "tela_inicial": "painel_professor",
+        "escola_adm_id": None,
+    }
+
+
 def obter_claims_jwt_usuario(sessao: Session, usuario: Usuario) -> dict[str, Any]:
-    """Monta as claims padronizadas do JWT com o plano ativo, tipo_usuario, grupo e permissão de chat."""
+    """Monta as claims padronizadas do JWT com o plano ativo, tipo_usuario, perfil, tela_inicial e grupo."""
     planos_map = {p.id_plano: p.nome_plano for p in garantir_planos_iniciais(sessao).values()}
 
     # Busca grupo onde o usuário é dono ou membro
@@ -164,42 +219,96 @@ def obter_claims_jwt_usuario(sessao: Session, usuario: Usuario) -> dict[str, Any
         )
     ).scalars().all()
 
-    nomes_planos = [planos_map.get(c.fk_Plano_id_plano, "basico") for c in contratos_usuario]
+    nomes_planos = [planos_map.get(c.fk_Plano_id_plano, "normal") for c in contratos_usuario]
     if grupo and grupo.fk_Contrato_id_cont:
         cont_grupo = sessao.get(Contrato, grupo.fk_Contrato_id_cont)
-        if cont_grupo:
-            nomes_planos.append(planos_map.get(cont_grupo.fk_Plano_id_plano, "basico"))
+        if cont_grupo and cont_grupo.status_contrato == "ativo":
+            nomes_planos.append(planos_map.get(cont_grupo.fk_Plano_id_plano, "normal"))
 
-    prioridade = {"institucional": 4, "pro_plus": 3, "pro": 2, "basico": 1}
-    plano_principal = "basico"
+    vinc_escs = sessao.execute(
+        select(User_esc).where(User_esc.fk_Usuario_id_usuario == usuario.id_usuario)
+    ).scalars().all()
+    for ve in vinc_escs:
+        esc = sessao.get(Escola, ve.fk_Escola_id_escola)
+        if esc and esc.fk_Contrato_id_cont:
+            cont_esc = sessao.get(Contrato, esc.fk_Contrato_id_cont)
+            if cont_esc and cont_esc.status_contrato == "ativo":
+                nomes_planos.append(planos_map.get(cont_esc.fk_Plano_id_plano, "normal"))
+
+    prioridade = {"institucional_plus": 4, "institucional": 3, "pro": 2, "normal": 1}
+    plano_principal = "normal"
     for np in nomes_planos:
         if prioridade.get(np, 0) > prioridade.get(plano_principal, 0):
             plano_principal = np
 
-    if usuario.tipo_usuario in ("adm_institucional", "prof_institucional"):
+    if usuario.tipo_usuario == "adm_institucional" and plano_principal == "normal":
+        plano_principal = "institucional_plus"
+    elif usuario.tipo_usuario in ("adm_escola", "adm_pro_plus") and plano_principal == "normal":
+        plano_principal = "institucional"
+    elif usuario.tipo_usuario == "prof_institucional" and plano_principal == "normal":
         plano_principal = "institucional"
 
     pode_chat = True
     if usuario.tipo_usuario == "adm_institucional":
         pode_chat = False
-    else:
-        vinc_escs = sessao.execute(
-            select(User_esc).where(User_esc.fk_Usuario_id_usuario == usuario.id_usuario)
-        ).scalars().all()
-        if vinc_escs and all(not v.pode_chat for v in vinc_escs):
-            pode_chat = False
+    elif vinc_escs and all(not v.pode_chat for v in vinc_escs):
+        pode_chat = False
 
     tags_lista = [t for t in (usuario.tags_usuario or "").split(",") if t]
+    perfil_info = resolver_perfil_e_tela(sessao, usuario)
 
     return {
         "sub": str(usuario.id_usuario),
         "id_prof": usuario.id_usuario,
+        "email": usuario.email_usuario,
         "tipo_usuario": usuario.tipo_usuario,
+        "perfil": perfil_info["perfil"],
+        "tela_inicial": perfil_info["tela_inicial"],
+        "escola_adm_id": perfil_info["escola_adm_id"],
         "plano": plano_principal,
         "id_grupo": grupo.id_grupo if grupo else None,
         "pode_chat": pode_chat,
         "tags": tags_lista,
         "is_verified": True,
+        "tv": int(getattr(usuario, "token_version", None) or 1),
+    }
+
+
+def obter_perfil_completo_usuario(sessao: Session, usuario: Usuario) -> dict[str, Any]:
+    """Retorna perfil completo, tela recomendada e permissões por escola para o frontend."""
+    from services.planos import listar_escolas_usuario
+
+    claims = obter_claims_jwt_usuario(sessao, usuario)
+    escolas = listar_escolas_usuario(sessao, usuario)
+    eh_adm_sistema = usuario.tipo_usuario == "adm_sistema"
+    eh_adm_rede = usuario.tipo_usuario == "adm_institucional"
+    eh_adm_alguma_escola = any(e.get("papel") == "adm" for e in escolas)
+
+    return {
+        "id_usuario": usuario.id_usuario,
+        "nome_usuario": usuario.nome_usuario,
+        "email_usuario": usuario.email_usuario,
+        "telefone_usuario": usuario.telefone_usuario,
+        "tipo_usuario": usuario.tipo_usuario,
+        "instrucoes_ia": getattr(usuario, "instrucoes_ia", None) or "",
+        "perfil": claims["perfil"],
+        "tela_inicial": claims["tela_inicial"],
+        "escola_adm_id": claims["escola_adm_id"],
+        "plano": claims["plano"],
+        "id_grupo": claims["id_grupo"],
+        "pode_chat": claims["pode_chat"],
+        "tags": claims["tags"],
+        "escolas": escolas,
+        "permissoes": {
+            "eh_admin_sistema": eh_adm_sistema,
+            "eh_admin_rede": eh_adm_rede,
+            "pode_acessar_painel_adm": eh_adm_sistema or eh_adm_rede or usuario.tipo_usuario in ("adm_escola", "adm_pro_plus"),
+            "pode_gerenciar_professores": eh_adm_rede or usuario.tipo_usuario in ("adm_escola", "adm_pro_plus"),
+            "pode_gerenciar_alunos": eh_adm_sistema or eh_adm_rede or eh_adm_alguma_escola,
+            "pode_gerenciar_turmas": eh_adm_sistema or eh_adm_rede or eh_adm_alguma_escola,
+            "pode_criar_escolas": eh_adm_rede or usuario.tipo_usuario == "normal",
+            "pode_chat": claims["pode_chat"],
+        },
     }
 
 
@@ -240,7 +349,7 @@ def cria_prof(sessao: Session, dados: Professor) -> dict[str, Any]:
             "id_usuario": professor.id_usuario,
             "id_grupo": grupo.id_grupo,
             "id_escola_inicial": escola.id_escola,
-            "plano": "basico",
+            "plano": "normal",
         }
     except IntegrityError as e:
         sessao.rollback()
@@ -324,36 +433,49 @@ def logarProfessor(
 
 
 def logar_com_google(dados: GoogleAuthRequest, sessao: Session) -> Token:
-    """Autentica ou cadastra usuário via conta Google e provisiona estrutura inicial."""
-    email = dados.email
-    nome = dados.nome
-    google_id = dados.google_id
+    """Autentica ou cadastra usuário via conta Google validando criptograficamente o id_token."""
+    if not dados.id_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="O id_token assinado pelo Google é obrigatório para autenticação OAuth.",
+        )
 
-    if dados.id_token:
-        google_client_id = os.getenv("GOOGLE_CLIENT_ID")
-        try:
-            if google_client_id:
-                from google.auth.transport import requests as google_requests
-                from google.oauth2 import id_token as google_id_token
+    google_client_id = (os.getenv("GOOGLE_CLIENT_ID") or "").strip()
+    try:
+        if google_client_id:
+            from google.auth.transport import requests as google_requests
+            from google.oauth2 import id_token as google_id_token
 
-                info = google_id_token.verify_oauth2_token(
-                    dados.id_token, google_requests.Request(), google_client_id
-                )
-            else:
-                info = jwt.decode(dados.id_token, options={"verify_signature": False})
-            email = email or info.get("email")
-            nome = nome or info.get("name") or info.get("given_name")
-            google_id = google_id or info.get("sub")
-        except Exception as exc:
+            info = google_id_token.verify_oauth2_token(
+                dados.id_token, google_requests.Request(), google_client_id
+            )
+        elif settings.ENVIRONMENT in ("test", "testing", "development", "dev"):
+            # Em ambiente de teste local sem GOOGLE_CLIENT_ID externo, exige assinatura com SECRET_KEY local
+            info = jwt.decode(
+                dados.id_token,
+                settings.SECRET_KEY,
+                algorithms=[settings.ALGORITHM],
+            )
+        else:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Token Google inválido: {exc}",
-            ) from exc
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="GOOGLE_CLIENT_ID não configurado no servidor.",
+            )
+        email = info.get("email")
+        nome = info.get("name") or info.get("given_name") or dados.nome
+        google_id = info.get("sub")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token Google inválido ou não verificado.",
+        ) from exc
 
     if not email and not google_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Informe um id_token válido ou email/google_id para login com Google.",
+            detail="O id_token não contém identificadores válidos (sub/email).",
         )
 
     usuario = None
@@ -390,6 +512,119 @@ def logar_com_google(dados: GoogleAuthRequest, sessao: Session) -> Token:
     else:
         if google_id and not usuario.google_id:
             usuario.google_id = google_id
+        if usuario.tipo_usuario == "normal":
+            provisionar_estrutura_inicial_usuario(sessao, usuario)
+        sessao.commit()
+
+    claims = obter_claims_jwt_usuario(sessao, usuario)
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = security.criar_access_token(
+        data=claims,
+        expires_delta=access_token_expires,
+    )
+    return Token(access_token=access_token, token_type="bearer", requires_2fa=False)
+
+
+def logar_com_microsoft(dados: MicrosoftAuthRequest, sessao: Session) -> Token:
+    """Autentica ou cadastra usuário via conta Microsoft OAuth (id_token ou access_token)."""
+    if not dados.id_token and not dados.access_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="O id_token ou access_token da Microsoft é obrigatório para autenticação OAuth.",
+        )
+
+    ms_client_id = (os.getenv("MICROSOFT_CLIENT_ID") or "").strip()
+    try:
+        if dados.access_token and (ms_client_id or settings.ENVIRONMENT == "production"):
+            import httpx
+
+            resp = httpx.get(
+                "https://graph.microsoft.com/v1.0/me",
+                headers={"Authorization": f"Bearer {dados.access_token}"},
+                timeout=10.0,
+            )
+            if not resp.is_success:
+                raise ValueError("Access token Microsoft rejeitado pelo Graph API.")
+            graph_info = resp.json()
+            email = graph_info.get("mail") or graph_info.get("userPrincipalName")
+            nome = graph_info.get("displayName") or dados.nome
+            microsoft_id = graph_info.get("id")
+        elif ms_client_id and dados.id_token:
+            jwks_client = jwt.PyJWKClient("https://login.microsoftonline.com/common/discovery/v2.0/keys")
+            signing_key = jwks_client.get_signing_key_from_jwt(dados.id_token)
+            info = jwt.decode(
+                dados.id_token,
+                signing_key.key,
+                algorithms=["RS256"],
+                audience=ms_client_id,
+                options={"verify_iss": False},
+            )
+            email = info.get("email") or info.get("preferred_username") or info.get("upn")
+            nome = info.get("name") or info.get("given_name") or dados.nome
+            microsoft_id = info.get("oid") or info.get("sub")
+        elif settings.ENVIRONMENT in ("test", "testing", "development", "dev"):
+            token_raw = dados.id_token or dados.access_token or ""
+            info = jwt.decode(
+                token_raw,
+                settings.SECRET_KEY,
+                algorithms=[settings.ALGORITHM],
+            )
+            email = info.get("email") or info.get("preferred_username") or info.get("upn")
+            nome = info.get("name") or info.get("given_name") or dados.nome
+            microsoft_id = info.get("oid") or info.get("sub")
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="MICROSOFT_CLIENT_ID não configurado no servidor.",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token Microsoft inválido ou não verificado.",
+        ) from exc
+
+    if not email and not microsoft_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="O token Microsoft não contém identificadores válidos (oid/sub/email).",
+        )
+
+    usuario = None
+    if microsoft_id:
+        usuario = sessao.execute(
+            select(Usuario).where(Usuario.microsoft_id == microsoft_id)
+        ).scalars().first()
+    if not usuario and email:
+        usuario = sessao.execute(
+            select(Usuario).where(Usuario.email_usuario == email.strip().lower())
+        ).scalars().first()
+
+    if not usuario:
+        usuario = Usuario(
+            nome_usuario=nome or (email.split("@")[0] if email else "Professor Microsoft"),
+            email_usuario=email.strip().lower() if email else None,
+            microsoft_id=microsoft_id,
+            tipo_usuario="normal",
+        )
+        sessao.add(usuario)
+        sessao.flush()
+
+        mfa = user2famethods(
+            tipo=Tipo2FA.NONE,
+            secret=None,
+            usa_verificacao=False,
+            data_criacao=datetime.now(timezone.utc),
+            id_prof=usuario.id_usuario,
+        )
+        sessao.add(mfa)
+        provisionar_estrutura_inicial_usuario(sessao, usuario)
+        sessao.commit()
+        sessao.refresh(usuario)
+    else:
+        if microsoft_id and not usuario.microsoft_id:
+            usuario.microsoft_id = microsoft_id
         if usuario.tipo_usuario == "normal":
             provisionar_estrutura_inicial_usuario(sessao, usuario)
         sessao.commit()
@@ -448,8 +683,49 @@ def deletaProfessor(
                 detail="Você não tem permissão para apagar este professor",
             )
 
-        sessao.execute(delete(turmas).where(turmas.id_prof == id_prof))
+        alunos_ids = sessao.execute(
+            select(alunos.id_aluno).where(alunos.id_prof == id_prof)
+        ).scalars().all()
+        msgs_ids = sessao.execute(
+            select(Mensagem.id_mensagem).where(
+                (Mensagem.fk_Usuario_id_usuario == id_prof)
+                | (Mensagem.fk_Aluno_id_aluno.in_(alunos_ids) if alunos_ids else False)
+            )
+        ).scalars().all()
+        if msgs_ids:
+            sessao.execute(delete(mensagem_al).where(mensagem_al.c.id_mensagem.in_(msgs_ids)))
+            sessao.execute(delete(Mensagem).where(Mensagem.id_mensagem.in_(msgs_ids)))
+        if alunos_ids:
+            sessao.execute(delete(mensagem_al).where(mensagem_al.c.id_aluno.in_(alunos_ids)))
+            sessao.execute(delete(chat).where(chat.fk_Aluno_id_aluno.in_(alunos_ids)))
+        sessao.execute(delete(chat).where(chat.fk_Usuario_id_usuario == id_prof))
+        from services.storage import excluir_arquivos_por_professor
+
+        excluir_arquivos_por_professor(sessao, id_prof)
         sessao.execute(delete(alunos).where(alunos.id_prof == id_prof))
+        sessao.execute(delete(turmas).where(turmas.id_prof == id_prof))
+        sessao.execute(delete(PasswordResetCode).where(PasswordResetCode.id_prof == id_prof))
+        sessao.execute(delete(user2facodes).where(user2facodes.id_prof == id_prof))
+        sessao.execute(delete(user2famethods).where(user2famethods.id_prof == id_prof))
+        sessao.execute(delete(User_esc).where(User_esc.fk_Usuario_id_usuario == id_prof))
+        sessao.execute(delete(User_grupo).where(User_grupo.fk_Usuario_id_usuario == id_prof))
+        conts_ids = sessao.execute(
+            select(User_cont.fk_Contrato_id_cont).where(User_cont.fk_Usuario_id_usuario == id_prof)
+        ).scalars().all()
+        sessao.execute(delete(User_cont).where(User_cont.fk_Usuario_id_usuario == id_prof))
+        grupos_user = sessao.execute(select(Grupo).where(Grupo.fk_Usuario_id_usuario == id_prof)).scalars().all()
+        for g in grupos_user:
+            escs_ids = sessao.execute(
+                select(Escola.id_escola).where(Escola.fk_Grupo_id_grupo == g.id_grupo)
+            ).scalars().all()
+            if escs_ids:
+                sessao.execute(delete(User_esc).where(User_esc.fk_Escola_id_escola.in_(escs_ids)))
+                sessao.execute(delete(turmas).where(turmas.fk_Escola_id_escola.in_(escs_ids)))
+            sessao.execute(delete(Escola).where(Escola.fk_Grupo_id_grupo == g.id_grupo))
+            sessao.delete(g)
+        if conts_ids:
+            sessao.execute(delete(Pgto).where(Pgto.fk_Contrato_id_cont.in_(conts_ids)))
+            sessao.execute(delete(Nota_fiscal).where(Nota_fiscal.fk_Contrato_id_cont.in_(conts_ids)))
         sessao.delete(professor)
         sessao.commit()
         return {"mensagem": "Professor apagado com sucesso"}
@@ -485,11 +761,13 @@ def EditaProfessor(
             professor.nome_prof = dados.nomeProf
         if dados.tags is not None:
             professor.tags_usuario = _normalizar_tags(dados.tags)
+        if dados.instrucoes_ia is not None:
+            professor.instrucoes_ia = dados.instrucoes_ia.strip()
 
         sessao.commit()
         sessao.refresh(professor)
 
-        return {"mensagem": "Professor editado com sucesso"}
+        return {"mensagem": "Professor editado com sucesso", "instrucoes_ia": professor.instrucoes_ia or ""}
 
     except OperationalError as e:
         raise HTTPException(
@@ -501,3 +779,157 @@ def EditaProfessor(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro interno. Erro: {e}",
         )
+
+
+def atualizar_instrucoes_ia_usuario(
+    sessao: Session,
+    professor_logado: professores,
+    instrucoes_ia: str,
+) -> dict[str, Any]:
+    professor = sessao.get(professores, professor_logado.id_prof)
+    if not professor:
+        raise HTTPException(status_code=404, detail="professor não encontrado")
+    professor.instrucoes_ia = (instrucoes_ia or "").strip()
+    sessao.commit()
+    sessao.refresh(professor)
+    return {
+        "mensagem": "Instruções personalizadas para a IA atualizadas com sucesso.",
+        "instrucoes_ia": professor.instrucoes_ia or "",
+    }
+
+
+def desconectar_todos_dispositivos_usuario(
+    sessao: Session,
+    professor_logado: professores,
+) -> dict[str, Any]:
+    professor = sessao.get(professores, professor_logado.id_prof)
+    if not professor:
+        raise HTTPException(status_code=404, detail="professor não encontrado")
+    versao_atual = int(getattr(professor, "token_version", None) or 1)
+    professor.token_version = versao_atual + 1
+    sessao.commit()
+    sessao.refresh(professor)
+    return {
+        "mensagem": "Todos os dispositivos foram desconectados com sucesso.",
+        "token_version": professor.token_version,
+    }
+
+
+def exportar_dados_usuario(
+    sessao: Session,
+    professor_logado: professores,
+) -> dict[str, Any]:
+    """Exporta todos os dados vinculados ao professor (LGPD), excluindo senhas e segredos 2FA."""
+    perfil_completo = obter_perfil_completo_usuario(sessao, professor_logado)
+    escolas_lista = perfil_completo.get("escolas", [])
+    ids_escolas = [e["id_escola"] for e in escolas_lista if "id_escola" in e]
+
+    stmt_turmas = select(Turma).where(
+        (Turma.fk_Usuario_id_usuario == professor_logado.id_usuario)
+        | (Turma.fk_Escola_id_escola.in_(ids_escolas) if ids_escolas else False)
+    )
+    turmas_objs = sessao.execute(stmt_turmas).scalars().all()
+    ids_turmas = [t.id_turma for t in turmas_objs]
+
+    stmt_alunos = select(Aluno).where(
+        (Aluno.fk_Usuario_id_usuario == professor_logado.id_usuario)
+        | (Aluno.fk_Turma_id_turma.in_(ids_turmas) if ids_turmas else False)
+    )
+    alunos_objs = sessao.execute(stmt_alunos).scalars().all()
+
+    convs_objs = (
+        sessao.execute(
+            select(chat)
+            .where(chat.fk_Usuario_id_usuario == professor_logado.id_usuario)
+            .order_by(chat.criado_em.asc())
+        )
+        .scalars()
+        .all()
+    )
+    conversas_export: list[dict[str, Any]] = []
+    for c in convs_objs:
+        msgs_c = (
+            sessao.execute(
+                select(Mensagem)
+                .where(
+                    Mensagem.fk_chat_id_chat == c.id_chat,
+                    Mensagem.fk_Usuario_id_usuario == professor_logado.id_usuario,
+                )
+                .order_by(Mensagem.data_envio.asc())
+            )
+            .scalars()
+            .all()
+        )
+        conversas_export.append(
+            {
+                "conversa_id": c.id_chat,
+                "titulo": c.nome_chat,
+                "id_aluno": c.fk_Aluno_id_aluno,
+                "criado_em": c.criado_em.isoformat() if c.criado_em else None,
+                "atualizado_em": c.atualizado_em.isoformat() if c.atualizado_em else None,
+                "mensagens": [
+                    {
+                        "id_mensagem": m.id_mensagem,
+                        "role": m.tipo_remetente,
+                        "conteudo": m.texto_mensagem,
+                        "data": m.data_envio.isoformat() if m.data_envio else None,
+                    }
+                    for m in msgs_c
+                ],
+            }
+        )
+
+    peis_export: list[dict[str, Any]] = []
+    ia_api_url = os.getenv("IA_API_URL", os.getenv("URL", "http://localhost:8001")).rstrip("/")
+    if alunos_objs and settings.ENVIRONMENT not in ("test", "testing"):
+        try:
+            import httpx
+
+            claims = obter_claims_jwt_usuario(sessao, professor_logado)
+            tok = security.criar_access_token(data=claims, expires_delta=timedelta(minutes=5))
+            headers = {"Authorization": f"Bearer {tok}"}
+            with httpx.Client(timeout=2.0) as client:
+                for al in alunos_objs:
+                    r = client.get(f"{ia_api_url}/alunos/{al.id_aluno}/pei", headers=headers)
+                    if r.is_success:
+                        peis_export.append({"id_aluno": al.id_aluno, "peis": r.json()})
+        except Exception:
+            pass
+
+    return {
+        "exportado_em": datetime.now(timezone.utc).isoformat(),
+        "perfil": {
+            "id_usuario": professor_logado.id_usuario,
+            "nome_usuario": professor_logado.nome_usuario,
+            "email_usuario": professor_logado.email_usuario,
+            "telefone_usuario": professor_logado.telefone_usuario,
+            "cpf_cnpj": professor_logado.cpf_cnpj,
+            "tipo_usuario": professor_logado.tipo_usuario,
+            "tags": perfil_completo.get("tags", []),
+            "instrucoes_ia": getattr(professor_logado, "instrucoes_ia", None) or "",
+            "plano": perfil_completo.get("plano", "normal"),
+        },
+        "escolas": escolas_lista,
+        "turmas": [
+            {
+                "id_turma": t.id_turma,
+                "nome_turma": t.nome_turma,
+                "id_escola": t.fk_Escola_id_escola,
+            }
+            for t in turmas_objs
+        ],
+        "alunos": [
+            {
+                "id_aluno": a.id_aluno,
+                "nome_aluno": a.nome_aluno,
+                "idade_aluno": a.idade_aluno,
+                "neurodivergencia": a.neuro_aluno,
+                "descricao": a.desc_aluno,
+                "perfil_ia": a.perfil_ia,
+                "id_turma": a.fk_Turma_id_turma,
+            }
+            for a in alunos_objs
+        ],
+        "conversas": conversas_export,
+        "peis": peis_export,
+    }

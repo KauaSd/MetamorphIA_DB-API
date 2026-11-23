@@ -206,6 +206,14 @@ CREATE TABLE Pgto (
     data_vencimento DATE NOT NULL,
     status_pagamento VARCHAR(50) NOT NULL DEFAULT 'Pendente',
     fk_Contrato_id_cont INT NOT NULL,
+    mp_preference_id VARCHAR(150),
+    mp_payment_id VARCHAR(100) UNIQUE,
+    mp_external_reference VARCHAR(150),
+    mp_status VARCHAR(50),
+    valor_pagamento NUMERIC(10, 2),
+    metodo_pagamento VARCHAR(50),
+    data_pagamento TIMESTAMPTZ,
+    dados_ativacao_json TEXT,
     CONSTRAINT fk_pgto_contrato 
         FOREIGN KEY (fk_Contrato_id_cont) 
         REFERENCES Contrato(id_cont) 
@@ -332,10 +340,10 @@ CREATE TABLE user_2fa_codes (
 -- SEEDS INICIAIS DE PLANOS
 -- =======================================================================
 INSERT INTO Plano (nome_plano, max_escolas, max_turmas_por_escola, max_alunos_por_turma) VALUES
-    ('basico', 3, 2, 2),
+    ('normal', 3, 2, 2),
     ('pro', 10, 5, 10),
-    ('pro_plus', 1, NULL, NULL),
-    ('institucional', NULL, NULL, NULL)
+    ('institucional', 1, NULL, NULL),
+    ('institucional_plus', NULL, NULL, NULL)
 ON CONFLICT (nome_plano) DO NOTHING;
 
 -- =======================================================================

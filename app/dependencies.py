@@ -47,18 +47,26 @@ def pegar_usuario_por_id(sessao: Session, id: int):
 
 
 def pegar_usuario_por_indentificador(sessao: Session, indentificador: str):
-    if is_email(indentificador):
+    limpo = (indentificador or "").strip()
+    if is_email(limpo):
         return (
             sessao.query(professores)
-            .filter(professores.email_prof == indentificador)
+            .filter(professores.email_prof == limpo.lower())
             .first()
         )
-    else:
-        return (
+    apenas_digitos = re.sub(r"\D", "", limpo)
+    usuario = (
+        sessao.query(professores)
+        .filter(professores.num_prof == limpo)
+        .first()
+    )
+    if not usuario and apenas_digitos:
+        usuario = (
             sessao.query(professores)
-            .filter(professores.num_prof == indentificador)
+            .filter(professores.num_prof == apenas_digitos)
             .first()
         )
+    return usuario
 
 def pegar_professor_logado(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
@@ -84,6 +92,12 @@ def pegar_professor_logado(
     professor = pegar_usuario_por_id(sessao, int(id_prof))
     if professor is None:
         print(professor)
+        raise credentials_exception
+    versao_atual = int(getattr(professor, "token_version", None) or 1)
+    versao_token = payload.get("tv")
+    if versao_token is not None and int(versao_token) != versao_atual:
+        raise credentials_exception
+    if versao_token is None and versao_atual > 1:
         raise credentials_exception
     return professor
 

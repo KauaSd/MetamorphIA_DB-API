@@ -56,9 +56,12 @@ class Usuario(base):
     telefone_usuario = Column(String(20), unique=True, index=True, nullable=True)
     senha_usuario = Column(String(255), nullable=True)
     google_id = Column(String(150), unique=True, index=True, nullable=True)
+    microsoft_id = Column(String(150), unique=True, index=True, nullable=True)
     cpf_cnpj = Column(String(20), nullable=True)
     tipo_usuario = Column(String(50), nullable=False, default="normal")
     tags_usuario = Column(Text, nullable=True)
+    instrucoes_ia = Column(Text, nullable=True)
+    token_version = Column(Integer, nullable=False, default=1)
 
     # Synonyms para retrocompatibilidade total com código que referencia 'professores'
     id_prof = synonym("id_usuario")
@@ -153,6 +156,14 @@ class Pgto(base):
     data_vencimento = Column(Date, nullable=False, default=lambda: date.today() + timedelta(days=30))
     status_pagamento = Column(String(50), nullable=False, default="Pendente")
     fk_Contrato_id_cont = Column(Integer, ForeignKey("contrato.id_cont"), nullable=False)
+    mp_preference_id = Column(String(150), nullable=True, index=True)
+    mp_payment_id = Column(String(100), nullable=True, unique=True, index=True)
+    mp_external_reference = Column(String(150), nullable=True, index=True)
+    mp_status = Column(String(50), nullable=True)
+    valor_pagamento = Column(Numeric(10, 2), nullable=True)
+    metodo_pagamento = Column(String(50), nullable=True)
+    data_pagamento = Column(DateTime(timezone=True), nullable=True)
+    dados_ativacao_json = Column(Text, nullable=True)
 
 
 class Turma(base):
@@ -245,6 +256,30 @@ class user2facodes(base):
     id_prof = Column(Integer, ForeignKey("usuario.id_usuario"))
 
 
+class PasswordResetCode(base):
+    __tablename__ = "password_reset_codes"
+    id_reset = Column(Integer, primary_key=True, autoincrement=True)
+    id_prof = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=False, index=True)
+    codigo = Column(String(6), nullable=False)
+    expira_em = Column(DateTime(timezone=True), nullable=False)
+    tentativas = Column(Integer, nullable=False, default=0)
+    usado = Column(Boolean, nullable=False, default=False)
+    criado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ArquivoAnexo(base):
+    __tablename__ = "arquivo_anexo"
+    id_arquivo = Column(String(64), primary_key=True)
+    id_prof = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=False, index=True)
+    id_aluno = Column(Integer, ForeignKey("aluno.id_aluno"), nullable=True, index=True)
+    id_conversa = Column(String(100), nullable=True, index=True)
+    nome_arquivo = Column(String(255), nullable=False)
+    mime_type = Column(String(150), nullable=False, default="application/octet-stream")
+    tamanho_bytes = Column(Integer, nullable=False, default=0)
+    caminho_arquivo = Column(String(500), nullable=False)
+    criado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 # Aliases de classes para manter 100% de compatibilidade com imports legados
 professores = Usuario
 turmas = Turma
@@ -254,10 +289,10 @@ mensagens = Mensagem
 
 
 PLANOS_PADRAO = {
-    "basico": {"max_escolas": 3, "max_turmas_por_escola": 2, "max_alunos_por_turma": 2},
+    "normal": {"max_escolas": 3, "max_turmas_por_escola": 2, "max_alunos_por_turma": 2},
     "pro": {"max_escolas": 10, "max_turmas_por_escola": 5, "max_alunos_por_turma": 10},
-    "pro_plus": {"max_escolas": 1, "max_turmas_por_escola": None, "max_alunos_por_turma": None},
-    "institucional": {"max_escolas": None, "max_turmas_por_escola": None, "max_alunos_por_turma": None},
+    "institucional": {"max_escolas": 1, "max_turmas_por_escola": None, "max_alunos_por_turma": None},
+    "institucional_plus": {"max_escolas": None, "max_turmas_por_escola": None, "max_alunos_por_turma": None},
 }
 
 
@@ -279,11 +314,107 @@ def garantir_planos_iniciais(sessao: Session) -> dict[str, Plano]:
             sessao.add(novo)
             existentes[nome] = novo
             alterou = True
+        elif existentes[nome].max_escolas != cfg["max_escolas"]:
+            existentes[nome].max_escolas = cfg["max_escolas"]
+            alterou = True
     if alterou:
         sessao.commit()
         for p in existentes.values():
             sessao.refresh(p)
-    return existentes
+    return {k: existentes[k] for k in PLANOS_PADRAO if k in existentes}
+
+
+def _corrigir_fks_legadas_postgres(eng) -> None:
+    """Corrige FKs antigas em user_2fa_methods/user_2fa_codes que apontavam para 'professores' em vez de 'usuario'."""
+    if eng.dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    DO $$
+                    DECLARE
+                        r RECORD;
+                    BEGIN
+                        FOR r IN (
+                            SELECT tc.table_name, tc.constraint_name
+                            FROM information_schema.table_constraints tc
+                            JOIN information_schema.constraint_column_usage ccu
+                              ON tc.constraint_name = ccu.constraint_name
+                             AND tc.table_schema = ccu.table_schema
+                            WHERE tc.constraint_type = 'FOREIGN KEY'
+                              AND tc.table_name IN ('user_2fa_methods', 'user_2fa_codes')
+                              AND ccu.table_name = 'professores'
+                        ) LOOP
+                            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT IF EXISTS %I', r.table_name, r.constraint_name);
+                        END LOOP;
+                    END $$;
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE user_2fa_methods DROP CONSTRAINT IF EXISTS fk_user_2fa_professores"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE user_2fa_codes DROP CONSTRAINT IF EXISTS fk_user_2fa_codes_professores"
+                )
+            )
+    except Exception as exc:
+        print(f"[Aviso] Não foi possível ajustar FKs legadas no PostgreSQL: {exc}")
+
+
+def _garantir_colunas_novas(eng) -> None:
+    """Adiciona colunas novas na tabela usuario caso o banco já existisse antes da atualização."""
+    from sqlalchemy import inspect, text
+
+    try:
+        insp = inspect(eng)
+        if not insp.has_table("usuario"):
+            return
+        colunas_existentes = {c["name"] for c in insp.get_columns("usuario")}
+        comandos: list[str] = []
+        if "microsoft_id" not in colunas_existentes:
+            comandos.append("ALTER TABLE usuario ADD COLUMN microsoft_id VARCHAR(150)")
+        if "instrucoes_ia" not in colunas_existentes:
+            comandos.append("ALTER TABLE usuario ADD COLUMN instrucoes_ia TEXT")
+        if "token_version" not in colunas_existentes:
+            comandos.append("ALTER TABLE usuario ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1")
+        if comandos:
+            with eng.begin() as conn:
+                for sql in comandos:
+                    conn.execute(text(sql))
+    except Exception as exc:
+        print(f"[Aviso] Não foi possível migrar colunas novas em usuario: {exc}")
+
+
+def _inicializar_banco_com_fallback() -> None:
+    """Garante que o banco esteja acessível e com as tabelas criadas (fallback local SQLite se o banco remoto falhar)."""
+    global engine
+    try:
+        base.metadata.create_all(bind=engine)
+        _garantir_colunas_novas(engine)
+        _corrigir_fks_legadas_postgres(engine)
+    except Exception as exc:
+        if not settings.BD_ACCESS.startswith("sqlite"):
+            print(f"[Aviso] Banco remoto indisponível ({exc}). Usando SQLite local para testes.")
+            sqlite_path = Path(__file__).resolve().parent / "metamorphia_local.db"
+            engine = create_engine(
+                f"sqlite:///{sqlite_path}",
+                connect_args={"check_same_thread": False},
+            )
+            base.metadata.create_all(bind=engine)
+            _garantir_colunas_novas(engine)
+
+
+from pathlib import Path as _Path  # noqa: E402
+Path = _Path
+_inicializar_banco_com_fallback()
 
 
 def pegar_bd():

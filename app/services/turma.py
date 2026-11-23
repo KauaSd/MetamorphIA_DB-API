@@ -32,8 +32,8 @@ def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
 
         ctx = obter_contexto_escola(sessao, id_prof, id_escola)
 
-        # Em escolas Pro+ e Institucional, apenas o adm pode configurar turmas
-        if ctx["papel"] != "adm":
+        # Em escolas Institucional e Institucional+, apenas o adm pode configurar turmas
+        if ctx["papel"] not in ("adm", "adm_sistema"):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Apenas o administrador da escola pode criar ou editar turmas.",
@@ -51,7 +51,7 @@ def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
                     "mensagem": f"Limite de {max_turmas} turmas por escola atingido no plano '{ctx['plano']}'.",
                     "codigo_erro": "LIMITE_PLANO_ATINGIDO",
                     "upgrade_sugerido": True,
-                    "opcoes_upgrade": ["pro", "pro_plus", "institucional"],
+                    "opcoes_upgrade": ["pro", "institucional", "institucional_plus"],
                 },
             )
 
@@ -91,18 +91,72 @@ def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
         )
 
 
-def DeletaTurma(sessao: Session, id_turma: int, id_prof: int):
+def EditarTurma(sessao: Session, id_turma: int, form: TurmaRequest, id_prof: int):
     try:
         turma = sessao.get(turmas, id_turma)
         if not turma:
             raise HTTPException(status_code=404, detail="Turma não encontrada")
 
         ctx = obter_contexto_escola(sessao, id_prof, turma.fk_Escola_id_escola)
-        if ctx["papel"] != "adm":
+        if ctx["papel"] not in ("adm", "adm_sistema"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Apenas o administrador da escola pode editar esta turma",
+            )
+
+        if form.id_escola and form.id_escola != turma.fk_Escola_id_escola:
+            ctx_dest = obter_contexto_escola(sessao, id_prof, form.id_escola)
+            if ctx_dest["papel"] not in ("adm", "adm_sistema"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Sem permissão na escola de destino",
+                )
+            turma.fk_Escola_id_escola = form.id_escola
+
+        turma.nome_turma = form.nome
+        sessao.commit()
+        sessao.refresh(turma)
+        return {
+            "mensagem": "Turma atualizada com sucesso",
+            "id_turma": turma.id_turma,
+            "id_escola": turma.fk_Escola_id_escola,
+            "nome_turma": turma.nome_turma,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        sessao.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro interno. Erro:{e}",
+        )
+
+
+def DeletaTurma(sessao: Session, id_turma: int, id_prof: int):
+    try:
+        from database import Aluno, conversas, delete, mensagem_al, mensagens
+
+        turma = sessao.get(turmas, id_turma)
+        if not turma:
+            raise HTTPException(status_code=404, detail="Turma não encontrada")
+
+        ctx = obter_contexto_escola(sessao, id_prof, turma.fk_Escola_id_escola)
+        if ctx["papel"] not in ("adm", "adm_sistema"):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Você não tem permissão para apagar esta turma",
             )
+
+        alunos_turma = sessao.execute(
+            select(Aluno).where(Aluno.fk_Turma_id_turma == id_turma)
+        ).scalars().all()
+        aluno_ids = [a.id_aluno for a in alunos_turma]
+        if aluno_ids:
+            sessao.execute(delete(mensagem_al).where(mensagem_al.c.id_aluno.in_(aluno_ids)))
+            sessao.execute(delete(mensagens).where(mensagens.fk_Aluno_id_aluno.in_(aluno_ids)))
+            sessao.execute(delete(conversas).where(conversas.fk_Aluno_id_aluno.in_(aluno_ids)))
+            sessao.execute(delete(Aluno).where(Aluno.id_aluno.in_(aluno_ids)))
+
         sessao.delete(turma)
         sessao.commit()
         return {"mensagem": "Turma apagada com sucesso"}

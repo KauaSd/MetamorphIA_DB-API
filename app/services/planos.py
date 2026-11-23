@@ -1,10 +1,12 @@
 from datetime import date, datetime, timedelta, timezone
 import re
+import secrets
 import time
 from typing import Any, Optional
 
 from config.settings import settings
 from database import (
+    Aluno,
     Contrato,
     Escola,
     Grupo,
@@ -12,6 +14,7 @@ from database import (
     Pgto,
     Plano,
     Session,
+    Turma,
     User_cont,
     User_esc,
     User_grupo,
@@ -100,31 +103,44 @@ def obter_contexto_escola(
             )
         ).scalars().first()
 
+    eh_adm_sistema = usuario.tipo_usuario == "adm_sistema"
     eh_dono_grupo = bool(grupo and grupo.fk_Usuario_id_usuario == id_usuario)
-    if not vinc_esc and not vinc_grupo and not eh_dono_grupo:
+    if not vinc_esc and not vinc_grupo and not eh_dono_grupo and not eh_adm_sistema:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Você não possui vínculo com esta escola.",
         )
 
-    planos_map = {p.id_plano: p for p in garantir_planos_iniciais(sessao).values()}
+    planos_por_nome = garantir_planos_iniciais(sessao)
+    planos_map = {p.id_plano: p for p in planos_por_nome.values()}
 
     contrato = None
     if escola.fk_Contrato_id_cont:
-        contrato = sessao.get(Contrato, escola.fk_Contrato_id_cont)
+        cand = sessao.get(Contrato, escola.fk_Contrato_id_cont)
+        if cand and cand.status_contrato == "ativo":
+            contrato = cand
     if not contrato and grupo and grupo.fk_Contrato_id_cont:
-        contrato = sessao.get(Contrato, grupo.fk_Contrato_id_cont)
+        cand = sessao.get(Contrato, grupo.fk_Contrato_id_cont)
+        if cand and cand.status_contrato == "ativo":
+            contrato = cand
 
-    plano_obj = planos_map.get(contrato.fk_Plano_id_plano) if contrato else planos_map["basico"]
-    nome_plano = plano_obj.nome_plano if plano_obj else "basico"
+    plano_obj = planos_map.get(contrato.fk_Plano_id_plano) if contrato else planos_por_nome["normal"]
+    nome_plano = plano_obj.nome_plano if plano_obj else "normal"
 
+    # No plano institucional (escola específica), o papel de adm só vale na escola em que há vínculo explícito.
+    # Saindo dessa escola específica (ou sem vínculo adm nela), o usuário atua como professor.
     papel = "professor"
-    if vinc_esc:
+    if eh_adm_sistema:
+        papel = "adm_sistema"
+    elif usuario.tipo_usuario == "prof_institucional":
+        papel = "professor"
+    elif vinc_esc:
         papel = vinc_esc.papel
-    elif vinc_grupo:
-        papel = vinc_grupo.papel
-    elif eh_dono_grupo:
-        papel = "adm"
+    elif nome_plano == "institucional_plus":
+        if vinc_grupo:
+            papel = vinc_grupo.papel
+        elif eh_dono_grupo:
+            papel = "adm"
 
     if usuario.tipo_usuario == "adm_institucional":
         pode_chat = False
@@ -242,19 +258,19 @@ def criar_escola_no_grupo(
     plano_grupo = (
         planos_por_id.get(contrato_grupo.fk_Plano_id_plano)
         if contrato_grupo
-        else planos["basico"]
+        else planos["normal"]
     )
 
-    if plano_grupo and plano_grupo.nome_plano == "institucional":
+    if plano_grupo and plano_grupo.nome_plano == "institucional_plus":
         limite_inst = contrato_grupo.max_qtd_escolas if contrato_grupo else None
         if limite_inst is not None and len(escolas_grupo) >= limite_inst:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
-                    "mensagem": f"Limite de {limite_inst} escolas do contrato institucional atingido.",
+                    "mensagem": f"Limite de {limite_inst} escolas do contrato Institucional+ atingido.",
                     "codigo_erro": "LIMITE_PLANO_ATINGIDO",
                     "upgrade_sugerido": True,
-                    "opcoes_upgrade": ["institucional"],
+                    "opcoes_upgrade": ["institucional_plus"],
                 },
             )
         nova = Escola(
@@ -279,7 +295,7 @@ def criar_escola_no_grupo(
             "id_escola": nova.id_escola,
             "nome_escola": nova.nome_escola,
             "id_grupo": grupo.id_grupo,
-            "plano": "institucional",
+            "plano": "institucional_plus",
         }
 
     contratos_user = sessao.execute(
@@ -291,8 +307,8 @@ def criar_escola_no_grupo(
         )
     ).scalars().all()
 
-    contrato_basico = next(
-        (c for c in contratos_user if planos_por_id[c.fk_Plano_id_plano].nome_plano == "basico"),
+    contrato_normal = next(
+        (c for c in contratos_user if planos_por_id[c.fk_Plano_id_plano].nome_plano == "normal"),
         None,
     )
     contrato_pro = next(
@@ -300,17 +316,17 @@ def criar_escola_no_grupo(
         None,
     )
 
-    qtd_basico = 0
+    qtd_normal = 0
     qtd_pro = 0
     for esc in escolas_grupo:
         c_esc = sessao.get(Contrato, esc.fk_Contrato_id_cont) if esc.fk_Contrato_id_cont else None
-        p_nome = planos_por_id[c_esc.fk_Plano_id_plano].nome_plano if c_esc else "basico"
-        if p_nome == "basico":
-            qtd_basico += 1
+        p_nome = planos_por_id[c_esc.fk_Plano_id_plano].nome_plano if c_esc else "normal"
+        if p_nome == "normal":
+            qtd_normal += 1
         elif p_nome == "pro":
             qtd_pro += 1
 
-    preferencia = (dados.usar_plano or "").lower()
+    preferencia = normalizar_nome_plano(dados.usar_plano or "")
     contrato_escolhido = None
     plano_escolhido_nome = None
 
@@ -322,7 +338,7 @@ def criar_escola_no_grupo(
                     "mensagem": "Você ainda não possui o plano Pro ativo.",
                     "codigo_erro": "LIMITE_PLANO_ATINGIDO",
                     "upgrade_sugerido": True,
-                    "opcoes_upgrade": ["pro", "pro_plus", "institucional"],
+                    "opcoes_upgrade": ["pro", "institucional", "institucional_plus"],
                 },
             )
         limite_pro = contrato_pro.max_qtd_escolas or planos["pro"].max_escolas or 10
@@ -333,16 +349,16 @@ def criar_escola_no_grupo(
                     "mensagem": f"Limite de {limite_pro} escolas no plano Pro atingido.",
                     "codigo_erro": "LIMITE_PLANO_ATINGIDO",
                     "upgrade_sugerido": True,
-                    "opcoes_upgrade": ["pro_plus", "institucional"],
+                    "opcoes_upgrade": ["institucional", "institucional_plus"],
                 },
             )
         contrato_escolhido = contrato_pro
         plano_escolhido_nome = "pro"
     else:
-        limite_basico = planos["basico"].max_escolas or 3
-        if qtd_basico < limite_basico and preferencia != "pro":
-            contrato_escolhido = contrato_basico or contrato_grupo
-            plano_escolhido_nome = "basico"
+        limite_normal = planos["normal"].max_escolas or 3
+        if qtd_normal < limite_normal and preferencia != "pro":
+            contrato_escolhido = contrato_normal or contrato_grupo
+            plano_escolhido_nome = "normal"
         elif contrato_pro:
             limite_pro = contrato_pro.max_qtd_escolas or planos["pro"].max_escolas or 10
             if qtd_pro < limite_pro:
@@ -356,7 +372,7 @@ def criar_escola_no_grupo(
                 "mensagem": "Limite de escolas atingido no plano atual. Melhore seu plano para adicionar mais escolas!",
                 "codigo_erro": "LIMITE_PLANO_ATINGIDO",
                 "upgrade_sugerido": True,
-                "opcoes_upgrade": ["pro", "pro_plus", "institucional"],
+                "opcoes_upgrade": ["pro", "institucional", "institucional_plus"],
             },
         )
 
@@ -387,108 +403,77 @@ def criar_escola_no_grupo(
     }
 
 
-def contratar_ou_trocar_plano(
-    sessao: Session, usuario: Usuario, dados: ContratarPlanoRequest
+PLANOS_PAGOS_PRECOS: dict[str, float] = {
+    "pro": 49.90,
+    "institucional": 199.90,
+    "institucional_plus": 999.90,
+}
+
+
+def normalizar_nome_plano(nome: str) -> str:
+    """Normaliza variações de nome do plano para: normal, pro, institucional, institucional_plus."""
+    bruto = (nome or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if bruto in ("normal", "free", "basico", "básico"):
+        return "normal"
+    if bruto in ("institucional", "pro+", "pro_+", "pro_plus", "institucional_escola", "institucional_normal"):
+        return "institucional"
+    if bruto in ("institucional+", "institucional_+", "institucional_plus", "institucional_rede", "rede"):
+        return "institucional_plus"
+    return bruto
+
+
+def ativar_contrato_e_permissoes(
+    sessao: Session,
+    usuario: Usuario,
+    contrato: Contrato,
+    nome_plano: str,
+    dados_ativacao: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Contrata ou faz upgrade de plano (pro, pro_plus, institucional) com CPF ou CNPJ."""
-    if usuario.tipo_usuario in ("adm_institucional", "prof_institucional"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Usuários institucionais (adm ou professor) não podem ter outra assinatura.",
-        )
-
-    planos = garantir_planos_iniciais(sessao)
-    nome_plano = (dados.nome_plano or "").strip().lower()
-    if nome_plano not in planos:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Plano '{nome_plano}' inválido. Opções: basico, pro, pro_plus, institucional.",
-        )
-
-    tipo_cont, doc_limpo = validar_documento_contrato(dados.tipo_cont, dados.documento_cont)
-    usuario.cpf_cnpj = doc_limpo
-    plano_obj = planos[nome_plano]
-
+    """Ativa um contrato pago e aplica todas as permissões/vínculos do plano ao usuário."""
+    cfg = dados_ativacao or {}
     grupo_principal, escola_inicial, _cont_ini = provisionar_estrutura_inicial_usuario(
         sessao, usuario
     )
+    contrato.status_contrato = "ativo"
+    contrato.data_inicio = date.today()
+    contrato.data_fim = date.today() + timedelta(days=30)
 
     id_escola_afetada = None
     id_grupo_afetado = grupo_principal.id_grupo
 
     if nome_plano == "pro":
-        contrato = Contrato(
-            tipo_cont=tipo_cont,
-            documento_cont=doc_limpo,
-            max_qtd_user=1,
-            max_qtd_escolas=dados.max_qtd_escolas or plano_obj.max_escolas,
-            max_qtd_turmas=plano_obj.max_turmas_por_escola,
-            max_qtd_alunos=plano_obj.max_alunos_por_turma,
-            valor_contrato=dados.valor_contrato or 49.90,
-            fk_Plano_id_plano=plano_obj.id_plano,
-            status_contrato="ativo",
-        )
-        sessao.add(contrato)
-        sessao.flush()
-        sessao.add(
-            User_cont(
-                fk_Usuario_id_usuario=usuario.id_usuario,
-                fk_Contrato_id_cont=contrato.id_cont,
-                eh_pagador=True,
-            )
-        )
+        escolas_ids = cfg.get("escolas_ids") or []
+        for esc_id in escolas_ids:
+            esc = sessao.get(Escola, esc_id)
+            if esc and esc.fk_Grupo_id_grupo == grupo_principal.id_grupo:
+                esc.fk_Contrato_id_cont = contrato.id_cont
 
-        if dados.escolas_ids:
-            for esc_id in dados.escolas_ids:
-                esc = sessao.get(Escola, esc_id)
-                if esc and esc.fk_Grupo_id_grupo == grupo_principal.id_grupo:
-                    esc.fk_Contrato_id_cont = contrato.id_cont
+    elif nome_plano == "institucional":
+        pode_chat_adm = True if cfg.get("adm_pode_chat") is None else bool(cfg.get("adm_pode_chat"))
+        email_inst = cfg.get("email_institucional")
+        id_escola_cfg = cfg.get("id_escola")
 
-    elif nome_plano == "pro_plus":
-        contrato = Contrato(
-            tipo_cont=tipo_cont,
-            documento_cont=doc_limpo,
-            email_institucional=dados.email_institucional,
-            max_qtd_user=dados.max_qtd_user or 5,
-            max_qtd_escolas=1,
-            max_qtd_turmas=dados.max_qtd_turmas or 10,
-            max_qtd_alunos=dados.max_qtd_alunos or 30,
-            valor_contrato=dados.valor_contrato or 199.90,
-            fk_Plano_id_plano=plano_obj.id_plano,
-            status_contrato="ativo",
-        )
-        sessao.add(contrato)
-        sessao.flush()
-        sessao.add(
-            User_cont(
-                fk_Usuario_id_usuario=usuario.id_usuario,
-                fk_Contrato_id_cont=contrato.id_cont,
-                eh_pagador=True,
-            )
-        )
-
-        pode_chat_adm = True if dados.adm_pode_chat is None else bool(dados.adm_pode_chat)
-        if dados.id_escola:
-            escola_pp = sessao.get(Escola, dados.id_escola)
-            if not escola_pp:
-                raise HTTPException(status_code=404, detail="Escola não encontrada para o Pro+.")
-            escola_pp.fk_Contrato_id_cont = contrato.id_cont
-            escola_pp.email_institucional = dados.email_institucional
+        if id_escola_cfg:
+            escola_inst = sessao.get(Escola, id_escola_cfg)
+            if not escola_inst:
+                raise HTTPException(status_code=404, detail="Escola não encontrada para o plano Institucional.")
+            escola_inst.fk_Contrato_id_cont = contrato.id_cont
+            escola_inst.email_institucional = email_inst
         else:
-            escola_pp = Escola(
-                nome_escola=dados.nome_escola or f"Escola Pro+ de {usuario.nome_usuario}",
-                email_institucional=dados.email_institucional,
+            escola_inst = Escola(
+                nome_escola=cfg.get("nome_escola") or f"Escola Institucional de {usuario.nome_usuario}",
+                email_institucional=email_inst,
                 fk_Grupo_id_grupo=grupo_principal.id_grupo,
                 fk_Contrato_id_cont=contrato.id_cont,
             )
-            sessao.add(escola_pp)
+            sessao.add(escola_inst)
             sessao.flush()
 
-        id_escola_afetada = escola_pp.id_escola
+        id_escola_afetada = escola_inst.id_escola
         vinc_esc = sessao.execute(
             select(User_esc).where(
                 User_esc.fk_Usuario_id_usuario == usuario.id_usuario,
-                User_esc.fk_Escola_id_escola == escola_pp.id_escola,
+                User_esc.fk_Escola_id_escola == escola_inst.id_escola,
             )
         ).scalars().first()
         if vinc_esc:
@@ -498,45 +483,19 @@ def contratar_ou_trocar_plano(
             sessao.add(
                 User_esc(
                     fk_Usuario_id_usuario=usuario.id_usuario,
-                    fk_Escola_id_escola=escola_pp.id_escola,
+                    fk_Escola_id_escola=escola_inst.id_escola,
                     papel="adm",
                     tags_areas=usuario.tags_usuario,
                     pode_chat=pode_chat_adm,
                 )
             )
         if usuario.tipo_usuario == "normal":
-            usuario.tipo_usuario = "adm_pro_plus"
+            usuario.tipo_usuario = "adm_escola"
 
-    elif nome_plano == "institucional":
-        if not dados.email_institucional:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="O e-mail institucional é obrigatório para configurar o plano Institucional.",
-            )
-        contrato = Contrato(
-            tipo_cont=tipo_cont,
-            documento_cont=doc_limpo,
-            email_institucional=dados.email_institucional,
-            max_qtd_user=dados.max_qtd_user or 50,
-            max_qtd_escolas=dados.max_qtd_escolas or 20,
-            max_qtd_turmas=dados.max_qtd_turmas or 20,
-            max_qtd_alunos=dados.max_qtd_alunos or 40,
-            valor_contrato=dados.valor_contrato or 999.90,
-            fk_Plano_id_plano=plano_obj.id_plano,
-            status_contrato="ativo",
-        )
-        sessao.add(contrato)
-        sessao.flush()
-        sessao.add(
-            User_cont(
-                fk_Usuario_id_usuario=usuario.id_usuario,
-                fk_Contrato_id_cont=contrato.id_cont,
-                eh_pagador=True,
-            )
-        )
-
-        grupo_principal.nome_grupo = dados.nome_grupo or grupo_principal.nome_grupo
-        grupo_principal.email_institucional = dados.email_institucional
+    elif nome_plano == "institucional_plus":
+        email_inst = cfg.get("email_institucional") or contrato.email_institucional
+        grupo_principal.nome_grupo = cfg.get("nome_grupo") or grupo_principal.nome_grupo
+        grupo_principal.email_institucional = email_inst
         grupo_principal.fk_Contrato_id_cont = contrato.id_cont
         usuario.tipo_usuario = "adm_institucional"
 
@@ -545,7 +504,7 @@ def contratar_ou_trocar_plano(
         ).scalars().all()
         for esc in escolas_g:
             esc.fk_Contrato_id_cont = contrato.id_cont
-            esc.email_institucional = dados.email_institucional
+            esc.email_institucional = email_inst
             ve = sessao.execute(
                 select(User_esc).where(
                     User_esc.fk_Usuario_id_usuario == usuario.id_usuario,
@@ -555,25 +514,59 @@ def contratar_ou_trocar_plano(
             if ve:
                 ve.papel = "adm"
                 ve.pode_chat = False
+            else:
+                sessao.add(
+                    User_esc(
+                        fk_Usuario_id_usuario=usuario.id_usuario,
+                        fk_Escola_id_escola=esc.id_escola,
+                        papel="adm",
+                        pode_chat=False,
+                    )
+                )
 
-    else:
-        contrato = sessao.get(Contrato, grupo_principal.fk_Contrato_id_cont)
+    return {
+        "id_grupo": id_grupo_afetado,
+        "id_escola": id_escola_afetada or escola_inicial.id_escola,
+    }
 
-    if contrato and contrato.valor_contrato:
-        sessao.add(
-            Pgto(
-                data_vencimento=date.today() + timedelta(days=30),
-                status_pagamento="Pago",
-                fk_Contrato_id_cont=contrato.id_cont,
-            )
+
+def contratar_ou_trocar_plano(
+    sessao: Session, usuario: Usuario, dados: ContratarPlanoRequest
+) -> dict[str, Any]:
+    """Configura plano gratuito ('normal') ou exige checkout Mercado Pago para planos pagos."""
+    if usuario.tipo_usuario in ("adm_institucional", "prof_institucional"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Usuários institucionais (adm ou professor) não podem ter outra assinatura.",
         )
-        sessao.add(
-            Nota_fiscal(
-                valor_nota=contrato.valor_contrato,
-                data_emissao=date.today(),
-                fk_Contrato_id_cont=contrato.id_cont,
-            )
+
+    planos = garantir_planos_iniciais(sessao)
+    nome_plano = normalizar_nome_plano(dados.nome_plano)
+    if nome_plano not in planos:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Plano '{nome_plano}' inválido. Opções: normal, pro, institucional, institucional_plus.",
         )
+
+    if nome_plano in PLANOS_PAGOS_PRECOS:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=(
+                f"O plano '{nome_plano}' requer pagamento via Mercado Pago. "
+                "Utilize POST /pagamentos/checkout para gerar o link de pagamento."
+            ),
+        )
+
+    tipo_cont, doc_limpo = validar_documento_contrato(dados.tipo_cont, dados.documento_cont)
+    usuario.cpf_cnpj = doc_limpo
+
+    grupo_principal, escola_inicial, _cont_ini = provisionar_estrutura_inicial_usuario(
+        sessao, usuario
+    )
+    contrato = sessao.get(Contrato, grupo_principal.fk_Contrato_id_cont)
+    if contrato:
+        contrato.tipo_cont = tipo_cont
+        contrato.documento_cont = doc_limpo
 
     sessao.commit()
     invalidar_cache_permissoes()
@@ -588,8 +581,8 @@ def contratar_ou_trocar_plano(
         "mensagem": f"Plano '{nome_plano}' configurado com sucesso.",
         "plano": nome_plano,
         "id_contrato": contrato.id_cont if contrato else None,
-        "id_grupo": id_grupo_afetado,
-        "id_escola": id_escola_afetada or escola_inicial.id_escola,
+        "id_grupo": grupo_principal.id_grupo,
+        "id_escola": escola_inicial.id_escola,
         "access_token": novo_token,
         "token_type": "bearer",
     }
@@ -601,17 +594,17 @@ def adicionar_professor_escola(
     id_escola: int,
     dados: AdicionarProfessorRequest,
 ) -> dict[str, Any]:
-    """Adiciona ou cria um professor em uma escola específica (Pro+ ou Institucional), aplicando tags de áreas."""
+    """Adiciona ou cria um professor em uma escola específica (Institucional ou Institucional+), aplicando tags de áreas."""
     ctx = obter_contexto_escola(sessao, adm_logado.id_usuario, id_escola)
-    if ctx["papel"] != "adm":
+    if ctx["papel"] not in ("adm", "adm_sistema"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Apenas o administrador da escola pode adicionar professores.",
         )
-    if ctx["plano"] not in ("pro_plus", "institucional"):
+    if ctx["plano"] not in ("institucional", "institucional_plus"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Apenas escolas dos planos Pro+ ou Institucional permitem múltiplos professores.",
+            detail="Apenas escolas dos planos Institucional ou Institucional+ permitem múltiplos professores.",
         )
 
     professores_atuais = sessao.execute(
@@ -633,13 +626,18 @@ def adicionar_professor_escola(
         select(Usuario).where(Usuario.email_usuario == dados.email)
     ).scalars().first()
 
+    senha_gerada = False
     if not prof:
-        tipo_novo = "prof_institucional" if ctx["plano"] == "institucional" else "normal"
+        senha_inicial = dados.senha
+        if not senha_inicial:
+            senha_inicial = secrets.token_urlsafe(16)
+            senha_gerada = True
+        tipo_novo = "prof_institucional"
         prof = Usuario(
             nome_usuario=dados.nome or dados.email.split("@")[0],
             email_usuario=dados.email,
             telefone_usuario=dados.telefone,
-            senha_usuario=security.cria_hash_senha(dados.senha or "SenhaPadrao@123"),
+            senha_usuario=security.cria_hash_senha(senha_inicial),
             tipo_usuario=tipo_novo,
             tags_usuario=tags_str,
         )
@@ -654,8 +652,6 @@ def adicionar_professor_escola(
                 id_prof=prof.id_usuario,
             )
         )
-        if tipo_novo == "normal":
-            provisionar_estrutura_inicial_usuario(sessao, prof)
 
     vinc = sessao.execute(
         select(User_esc).where(
@@ -682,6 +678,8 @@ def adicionar_professor_escola(
         "id_usuario": prof.id_usuario,
         "id_escola": id_escola,
         "plano_escola": ctx["plano"],
+        "papel": "professor",
+        "senha_temporaria_gerada": senha_gerada,
         "tags_areas": [t for t in (tags_str or "").split(",") if t],
     }
 
@@ -692,11 +690,12 @@ def adicionar_professor_grupo_institucional(
     id_grupo: int,
     dados: AdicionarProfessorRequest,
 ) -> dict[str, Any]:
-    """Cria/vincula um professor institucional no grupo e em múltiplas escolas da rede."""
+    """Cria/vincula um professor institucional no grupo e em múltiplas escolas da rede (Institucional+)."""
     grupo = sessao.get(Grupo, id_grupo)
     if not grupo:
         raise HTTPException(status_code=404, detail="Grupo não encontrado.")
-    if grupo.fk_Usuario_id_usuario != adm_logado.id_usuario and adm_logado.tipo_usuario != "adm_institucional":
+    eh_adm_grupo = grupo.fk_Usuario_id_usuario == adm_logado.id_usuario
+    if not eh_adm_grupo and adm_logado.tipo_usuario not in ("adm_institucional", "adm_sistema"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Apenas o administrador institucional do grupo pode gerenciar professores da rede.",
@@ -704,10 +703,10 @@ def adicionar_professor_grupo_institucional(
 
     contrato = sessao.get(Contrato, grupo.fk_Contrato_id_cont) if grupo.fk_Contrato_id_cont else None
     planos_map = {p.id_plano: p.nome_plano for p in garantir_planos_iniciais(sessao).values()}
-    if not contrato or planos_map.get(contrato.fk_Plano_id_plano) != "institucional":
+    if not contrato or planos_map.get(contrato.fk_Plano_id_plano) != "institucional_plus":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Este grupo não possui um plano Institucional ativo.",
+            detail="O gerenciamento de professores em rede é exclusivo do plano Institucional+. No plano Institucional, adicione professores diretamente na escola.",
         )
 
     profs_grupo = sessao.execute(
@@ -719,7 +718,7 @@ def adicionar_professor_grupo_institucional(
     if contrato.max_qtd_user and len(profs_grupo) >= contrato.max_qtd_user:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Limite de {contrato.max_qtd_user} professores do contrato institucional atingido.",
+            detail=f"Limite de {contrato.max_qtd_user} professores do contrato Institucional+ atingido.",
         )
 
     tags_str = _normalizar_tags(dados.tags_areas)
@@ -727,12 +726,17 @@ def adicionar_professor_grupo_institucional(
         select(Usuario).where(Usuario.email_usuario == dados.email)
     ).scalars().first()
 
+    senha_gerada = False
     if not prof:
+        senha_inicial = dados.senha
+        if not senha_inicial:
+            senha_inicial = secrets.token_urlsafe(16)
+            senha_gerada = True
         prof = Usuario(
             nome_usuario=dados.nome or dados.email.split("@")[0],
             email_usuario=dados.email,
             telefone_usuario=dados.telefone,
-            senha_usuario=security.cria_hash_senha(dados.senha or "SenhaPadrao@123"),
+            senha_usuario=security.cria_hash_senha(senha_inicial),
             tipo_usuario="prof_institucional",
             tags_usuario=tags_str,
         )
@@ -748,7 +752,8 @@ def adicionar_professor_grupo_institucional(
             )
         )
     else:
-        prof.tipo_usuario = "prof_institucional"
+        if prof.tipo_usuario == "normal":
+            prof.tipo_usuario = "prof_institucional"
         if tags_str:
             prof.tags_usuario = tags_str
 
@@ -806,6 +811,7 @@ def adicionar_professor_grupo_institucional(
         "tipo_usuario": prof.tipo_usuario,
         "id_grupo": id_grupo,
         "escolas_vinculadas": escolas_alvo,
+        "senha_temporaria_gerada": senha_gerada,
         "tags_areas": [t for t in (tags_str or "").split(",") if t],
     }
 
@@ -824,7 +830,7 @@ def atualizar_tags_professor(
     tags_str = _normalizar_tags(dados.tags_areas)
     if dados.id_escola:
         ctx = obter_contexto_escola(sessao, usuario_logado.id_usuario, dados.id_escola)
-        if ctx["papel"] != "adm" and usuario_logado.id_usuario != id_professor:
+        if ctx["papel"] not in ("adm", "adm_sistema") and usuario_logado.id_usuario != id_professor:
             raise HTTPException(status_code=403, detail="Sem permissão para alterar tags nesta escola.")
         ve = sessao.execute(
             select(User_esc).where(
@@ -836,7 +842,7 @@ def atualizar_tags_professor(
             raise HTTPException(status_code=404, detail="Professor não vinculado a esta escola.")
         ve.tags_areas = tags_str
     else:
-        if usuario_logado.id_usuario != id_professor and usuario_logado.tipo_usuario not in ("adm_pro_plus", "adm_institucional"):
+        if usuario_logado.id_usuario != id_professor and usuario_logado.tipo_usuario not in ("adm_escola", "adm_pro_plus", "adm_institucional", "adm_sistema"):
             raise HTTPException(status_code=403, detail="Sem permissão para alterar tags deste professor.")
         prof.tags_usuario = tags_str
 
@@ -846,6 +852,211 @@ def atualizar_tags_professor(
         "mensagem": "Tags de áreas atualizadas com sucesso.",
         "id_usuario": id_professor,
         "tags_areas": [t for t in (tags_str or "").split(",") if t],
+    }
+
+
+def listar_professores_escola(
+    sessao: Session,
+    adm_logado: Usuario,
+    id_escola: int,
+) -> list[dict[str, Any]]:
+    """Lista todos os professores vinculados a uma escola (exclusivo para ADM da escola ou ADM do sistema)."""
+    ctx = obter_contexto_escola(sessao, adm_logado.id_usuario, id_escola)
+    if ctx["papel"] not in ("adm", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador da escola pode listar os professores.",
+        )
+
+    vincs = sessao.execute(
+        select(User_esc).where(
+            User_esc.fk_Escola_id_escola == id_escola,
+            User_esc.papel == "professor",
+        )
+    ).scalars().all()
+    resultado = []
+    for v in vincs:
+        u = sessao.get(Usuario, v.fk_Usuario_id_usuario)
+        if not u:
+            continue
+        resultado.append({
+            "id_usuario": u.id_usuario,
+            "nome_usuario": u.nome_usuario,
+            "email_usuario": u.email_usuario,
+            "telefone_usuario": u.telefone_usuario,
+            "tipo_usuario": u.tipo_usuario,
+            "papel": v.papel,
+            "pode_chat": bool(v.pode_chat),
+            "tags_areas": [t for t in (v.tags_areas or "").split(",") if t],
+        })
+    return resultado
+
+
+def remover_professor_escola(
+    sessao: Session,
+    adm_logado: Usuario,
+    id_escola: int,
+    id_professor: int,
+) -> dict[str, Any]:
+    """Remove o vínculo de um professor com uma escola específica."""
+    ctx = obter_contexto_escola(sessao, adm_logado.id_usuario, id_escola)
+    if ctx["papel"] not in ("adm", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador da escola pode remover professores.",
+        )
+    vinc = sessao.execute(
+        select(User_esc).where(
+            User_esc.fk_Usuario_id_usuario == id_professor,
+            User_esc.fk_Escola_id_escola == id_escola,
+            User_esc.papel == "professor",
+        )
+    ).scalars().first()
+    if not vinc:
+        raise HTTPException(status_code=404, detail="Professor não encontrado nesta escola.")
+
+    sessao.delete(vinc)
+    sessao.commit()
+    invalidar_cache_permissoes()
+    return {"mensagem": "Professor removido da escola com sucesso.", "id_usuario": id_professor, "id_escola": id_escola}
+
+
+def listar_professores_grupo(
+    sessao: Session,
+    adm_logado: Usuario,
+    id_grupo: int,
+) -> list[dict[str, Any]]:
+    """Lista os professores vinculados a um grupo Institucional+."""
+    grupo = sessao.get(Grupo, id_grupo)
+    if not grupo:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado.")
+    if grupo.fk_Usuario_id_usuario != adm_logado.id_usuario and adm_logado.tipo_usuario not in ("adm_institucional", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador institucional do grupo pode listar professores da rede.",
+        )
+
+    vincs = sessao.execute(
+        select(User_grupo).where(
+            User_grupo.fk_Grupo_id_grupo == id_grupo,
+            User_grupo.papel == "professor",
+        )
+    ).scalars().all()
+    resultado = []
+    for vg in vincs:
+        u = sessao.get(Usuario, vg.fk_Usuario_id_usuario)
+        if not u:
+            continue
+        escolas_vinc = sessao.execute(
+            select(User_esc.fk_Escola_id_escola)
+            .join(Escola, Escola.id_escola == User_esc.fk_Escola_id_escola)
+            .where(
+                User_esc.fk_Usuario_id_usuario == u.id_usuario,
+                Escola.fk_Grupo_id_grupo == id_grupo,
+            )
+        ).scalars().all()
+        resultado.append({
+            "id_usuario": u.id_usuario,
+            "nome_usuario": u.nome_usuario,
+            "email_usuario": u.email_usuario,
+            "tipo_usuario": u.tipo_usuario,
+            "papel": vg.papel,
+            "escolas_ids": list(escolas_vinc),
+            "tags_areas": [t for t in (vg.tags_areas or "").split(",") if t],
+        })
+    return resultado
+
+
+def remover_professor_grupo(
+    sessao: Session,
+    adm_logado: Usuario,
+    id_grupo: int,
+    id_professor: int,
+) -> dict[str, Any]:
+    """Remove um professor do grupo Institucional+ e de todas as escolas do grupo."""
+    grupo = sessao.get(Grupo, id_grupo)
+    if not grupo:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado.")
+    if grupo.fk_Usuario_id_usuario != adm_logado.id_usuario and adm_logado.tipo_usuario not in ("adm_institucional", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador institucional do grupo pode remover professores da rede.",
+        )
+
+    vg = sessao.execute(
+        select(User_grupo).where(
+            User_grupo.fk_Usuario_id_usuario == id_professor,
+            User_grupo.fk_Grupo_id_grupo == id_grupo,
+            User_grupo.papel == "professor",
+        )
+    ).scalars().first()
+    if not vg:
+        raise HTTPException(status_code=404, detail="Professor não encontrado neste grupo.")
+
+    escolas_grupo_ids = sessao.execute(
+        select(Escola.id_escola).where(Escola.fk_Grupo_id_grupo == id_grupo)
+    ).scalars().all()
+    if escolas_grupo_ids:
+        vincs_esc = sessao.execute(
+            select(User_esc).where(
+                User_esc.fk_Usuario_id_usuario == id_professor,
+                User_esc.fk_Escola_id_escola.in_(escolas_grupo_ids),
+                User_esc.papel == "professor",
+            )
+        ).scalars().all()
+        for ve in vincs_esc:
+            sessao.delete(ve)
+
+    sessao.delete(vg)
+    sessao.commit()
+    invalidar_cache_permissoes()
+    return {"mensagem": "Professor removido da rede com sucesso.", "id_usuario": id_professor, "id_grupo": id_grupo}
+
+
+def obter_painel_institucional(sessao: Session, usuario: Usuario) -> dict[str, Any]:
+    """Retorna os dados completos da tela administrativa (Institucional ou Institucional+) para o ADM."""
+    if usuario.tipo_usuario not in ("adm_institucional", "adm_escola", "adm_pro_plus", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas administradores podem acessar o painel administrativo institucional.",
+        )
+
+    escolas_adm = [e for e in listar_escolas_usuario(sessao, usuario) if e.get("papel") in ("adm", "adm_sistema")]
+    escolas_detalhadas = []
+    for e_ctx in escolas_adm:
+        id_esc = e_ctx["id_escola"]
+        turmas_esc = sessao.execute(
+            select(Turma).where(Turma.fk_Escola_id_escola == id_esc)
+        ).scalars().all()
+        turma_ids = [t.id_turma for t in turmas_esc]
+        qtd_alunos = 0
+        if turma_ids:
+            qtd_alunos = len(
+                sessao.execute(select(Aluno).where(Aluno.fk_Turma_id_turma.in_(turma_ids))).scalars().all()
+            )
+        profs_esc = listar_professores_escola(sessao, usuario, id_esc)
+        escolas_detalhadas.append({
+            **e_ctx,
+            "qtd_turmas": len(turmas_esc),
+            "qtd_alunos": qtd_alunos,
+            "qtd_professores": len(profs_esc),
+            "professores": profs_esc,
+        })
+
+    grupo = sessao.execute(
+        select(Grupo).where(Grupo.fk_Usuario_id_usuario == usuario.id_usuario)
+    ).scalars().first()
+
+    tela = "painel_adm_institucional" if usuario.tipo_usuario == "adm_institucional" else "painel_adm_escola"
+    if usuario.tipo_usuario == "adm_sistema":
+        tela = "painel_adm_sistema"
+
+    return {
+        "tela": tela,
+        "tipo_usuario": usuario.tipo_usuario,
+        "id_grupo": grupo.id_grupo if grupo else None,
+        "nome_grupo": grupo.nome_grupo if grupo else None,
+        "escolas": escolas_detalhadas,
     }
 
 
@@ -859,3 +1070,71 @@ def listar_escolas_usuario(sessao: Session, usuario: Usuario) -> list[dict[str, 
         ctx = obter_contexto_escola(sessao, usuario.id_usuario, v.fk_Escola_id_escola)
         resultado.append(ctx)
     return resultado
+
+
+def editar_escola_usuario(
+    sessao: Session,
+    usuario: Usuario,
+    id_escola: int,
+    nome_escola: str,
+) -> dict[str, Any]:
+    """Atualiza o nome de uma escola caso o usuário seja administrador dela."""
+    ctx = obter_contexto_escola(sessao, usuario.id_usuario, id_escola)
+    if ctx["papel"] not in ("adm", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador da escola pode editá-la.",
+        )
+    escola = sessao.get(Escola, id_escola)
+    if not escola:
+        raise HTTPException(status_code=404, detail="Escola não encontrada.")
+    escola.nome_escola = nome_escola.strip()
+    sessao.commit()
+    invalidar_cache_permissoes()
+    return {
+        "id_escola": escola.id_escola,
+        "nome_escola": escola.nome_escola,
+        "id_grupo": escola.fk_Grupo_id_grupo,
+        "plano": ctx["plano"],
+    }
+
+
+def deletar_escola_usuario(
+    sessao: Session,
+    usuario: Usuario,
+    id_escola: int,
+) -> dict[str, Any]:
+    """Remove uma escola e suas turmas, alunos, conversas e vínculos em cascata."""
+    from database import conversas, delete, mensagem_al, mensagens
+
+    ctx = obter_contexto_escola(sessao, usuario.id_usuario, id_escola)
+    if ctx["papel"] not in ("adm", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador da escola pode excluí-la.",
+        )
+    escola = sessao.get(Escola, id_escola)
+    if not escola:
+        raise HTTPException(status_code=404, detail="Escola não encontrada.")
+
+    turmas_esc = sessao.execute(
+        select(Turma).where(Turma.fk_Escola_id_escola == id_escola)
+    ).scalars().all()
+    turma_ids = [t.id_turma for t in turmas_esc]
+    if turma_ids:
+        alunos_esc = sessao.execute(
+            select(Aluno).where(Aluno.fk_Turma_id_turma.in_(turma_ids))
+        ).scalars().all()
+        aluno_ids = [a.id_aluno for a in alunos_esc]
+        if aluno_ids:
+            sessao.execute(delete(mensagem_al).where(mensagem_al.c.id_aluno.in_(aluno_ids)))
+            sessao.execute(delete(mensagens).where(mensagens.fk_Aluno_id_aluno.in_(aluno_ids)))
+            sessao.execute(delete(conversas).where(conversas.fk_Aluno_id_aluno.in_(aluno_ids)))
+            sessao.execute(delete(Aluno).where(Aluno.id_aluno.in_(aluno_ids)))
+        sessao.execute(delete(Turma).where(Turma.id_turma.in_(turma_ids)))
+
+    sessao.execute(delete(User_esc).where(User_esc.fk_Escola_id_escola == id_escola))
+    sessao.delete(escola)
+    sessao.commit()
+    invalidar_cache_permissoes()
+    return {"mensagem": "Escola removida com sucesso.", "id_escola": id_escola}

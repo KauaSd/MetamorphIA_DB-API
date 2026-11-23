@@ -3,6 +3,8 @@ httpx
 pwdlib[argon2]
 psycopg2-binary
 PyJWT
+cryptography
+google-auth
 pyotp
 python-dotenv
 python-multipart

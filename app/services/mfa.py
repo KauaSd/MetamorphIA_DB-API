@@ -98,12 +98,13 @@ def envia_token(sessao: Session, id_prof: int):
         envia_msg_wpp(sessao, id_prof, msg)
 
 
-def pegar_token( sessao: Session, id_prof: int):
-    return sessao.query(user2facodes).filter(user2famethods.id_prof == id_prof).first()
+def pegar_token(sessao: Session, id_prof: int):
+    return sessao.query(user2facodes).filter(user2facodes.id_prof == id_prof).first()
+
 
 def verificar2fa(
-    dados: dict,
-    dados_pendentes: Validar2FARequest,
+    dados: Validar2FARequest,
+    dados_pendentes: dict,
     sessao: Session,
 ) -> Token:
     id_prof = dados_pendentes["id_prof"]
@@ -115,61 +116,67 @@ def verificar2fa(
     if tipo_2fa == str(Tipo2FA.TOTP) or tipo_2fa == "TOTP":
         validacao = security.verificar_totp(mfa.secret, dados.codigo)
     else:
-        mfa = pegar_token(sessao, id_prof)
-        if not mfa:
+        mfa_code = pegar_token(sessao, id_prof)
+        if not mfa_code:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="nenhum token solicitado."
+                detail="nenhum token solicitado.",
             )
-        token = mfa.codigo
-        expiracao = mfa.expira_em
+        token = mfa_code.codigo
+        expiracao = mfa_code.expira_em
         agora = datetime.now(timezone.utc)
-        tentativas = mfa.tentativas
+        tentativas = mfa_code.tentativas
 
         if expiracao.tzinfo is None:
-            expiracao = expiracao.replace(tzinfo = timezone.utc)
+            expiracao = expiracao.replace(tzinfo=timezone.utc)
 
-        if tentativas>=5:
+        if tentativas >= 5:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail= "muitas tentativas, reenvie o token"
-                )
-        
+                detail="muitas tentativas, reenvie o token",
+            )
+
         if not token:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail= "não foi pedido um token"
-                )
-        
+                detail="não foi pedido um token",
+            )
+
         if expiracao <= agora:
-            sessao.delete(mfa)
-            sessao.commit(mfa)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail= "token expirado, reenvie"
-                )
-        
-        if dados.codigo!= token:
-            mfa.tentativas +=1
+            sessao.delete(mfa_code)
             sessao.commit()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail= "token errado"
-                )
-        
-        validacao = True
-        sessao.delete(mfa)
-        sessao.commit()
+                detail="token expirado, reenvie",
+            )
 
+        if not secrets.compare_digest(str(dados.codigo), str(token)):
+            mfa_code.tentativas += 1
+            sessao.commit()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="token errado",
+            )
+
+        validacao = True
+        sessao.delete(mfa_code)
+        sessao.commit()
 
     if not validacao:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Código de verificação inválido ou expirado",
         )
+    usuario = sessao.get(professores, int(id_prof))
+    if usuario:
+        from services.users import obter_claims_jwt_usuario
+
+        claims = obter_claims_jwt_usuario(sessao, usuario)
+    else:
+        claims = {"sub": str(id_prof), "id_prof": int(id_prof), "is_verified": True}
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = security.criar_access_token(
-        data={"sub": str(id_prof), "is_verified": True},
+        data=claims,
         expires_delta=access_token_expires,
     )
     return Token(access_token=access_token, token_type="bearer")
