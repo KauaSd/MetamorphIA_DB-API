@@ -84,7 +84,7 @@ def pegar_professor_logado(
         )
         id_prof = payload.get("sub")
         is_verified = payload.get("is_verified")
-        if id_prof is None or not is_verified:
+        if id_prof is None or not is_verified or payload.get("purpose") == "refresh":
             raise credentials_exception
     except InvalidTokenError as e:
         print(e)

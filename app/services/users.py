@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import os
 import re
 from typing import Any, Optional
+import uuid
 
 from config.settings import DUMMY_HASH, settings
 from database import (
@@ -16,6 +17,7 @@ from database import (
     PasswordResetCode,
     Pgto,
     Plano,
+    RefreshToken,
     Session,
     Turma,
     User_cont,
@@ -274,6 +276,124 @@ def obter_claims_jwt_usuario(sessao: Session, usuario: Usuario) -> dict[str, Any
     }
 
 
+def emitir_par_tokens(sessao: Session, usuario: Usuario) -> Token:
+    """Emite access_token curto e refresh_token longo (com rotação e token_version)."""
+    claims = obter_claims_jwt_usuario(sessao, usuario)
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = security.criar_access_token(
+        data=claims,
+        expires_delta=access_token_expires,
+    )
+
+    jti = str(uuid.uuid4())
+    refresh_expires = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    expira_em = datetime.now(timezone.utc) + refresh_expires
+    tv = int(getattr(usuario, "token_version", None) or 1)
+    refresh_token = security.criar_access_token(
+        data={
+            "sub": str(usuario.id_usuario),
+            "jti": jti,
+            "tv": tv,
+            "purpose": "refresh",
+        },
+        expires_delta=refresh_expires,
+    )
+    sessao.add(
+        RefreshToken(
+            jti=jti,
+            id_prof=usuario.id_usuario,
+            token_version=tv,
+            expira_em=expira_em,
+            revogado=False,
+        )
+    )
+    sessao.commit()
+    return Token(
+        access_token=access_token,
+        token_type="bearer",
+        requires_2fa=False,
+        refresh_token=refresh_token,
+    )
+
+
+def renovar_tokens_por_refresh(sessao: Session, refresh_token_raw: Optional[str]) -> Token:
+    """Valida o refresh_token, aplica rotação (revoga o anterior) e emite novo par de tokens."""
+    if not refresh_token_raw or not refresh_token_raw.strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token não fornecido.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+        payload = jwt.decode(
+            refresh_token_raw.strip(),
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+        )
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token inválido ou expirado.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    if payload.get("purpose") != "refresh" or not payload.get("sub") or not payload.get("jti"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido para renovação.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    usuario = sessao.get(Usuario, int(payload["sub"]))
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuário não encontrado.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    versao_atual = int(getattr(usuario, "token_version", None) or 1)
+    if int(payload.get("tv", -1)) != versao_atual:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sessão revogada. Faça login novamente.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    reg_rt = sessao.get(RefreshToken, str(payload["jti"]))
+    if not reg_rt or reg_rt.id_prof != usuario.id_usuario:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token desconhecido.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if reg_rt.revogado:
+        # Detecção de reuso de refresh token rotacionado: invalida todas as sessões
+        usuario.token_version = versao_atual + 1
+        sessao.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token já utilizado. Todas as sessões foram revogadas por segurança.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    expira_em = reg_rt.expira_em
+    if expira_em.tzinfo is None:
+        expira_em = expira_em.replace(tzinfo=timezone.utc)
+    if expira_em <= datetime.now(timezone.utc):
+        reg_rt.revogado = True
+        sessao.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token expirado.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    reg_rt.revogado = True
+    return emitir_par_tokens(sessao, usuario)
+
+
 def obter_perfil_completo_usuario(sessao: Session, usuario: Usuario) -> dict[str, Any]:
     """Retorna perfil completo, tela recomendada e permissões por escola para o frontend."""
     from services.planos import listar_escolas_usuario
@@ -411,12 +531,7 @@ def logarProfessor(
 
     mfa = fnmfa.pegar_2fa_prof(sessao, usuario.id_prof)
     if not mfa.usa_verificacao:
-        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        claims = obter_claims_jwt_usuario(sessao, usuario)
-        access_token = security.criar_access_token(
-            data=claims,
-            expires_delta=access_token_expires,
-        )
+        return emitir_par_tokens(sessao, usuario)
     else:
         access_token_expires = timedelta(minutes=5)
         access_token = security.criar_access_token(
@@ -516,13 +631,7 @@ def logar_com_google(dados: GoogleAuthRequest, sessao: Session) -> Token:
             provisionar_estrutura_inicial_usuario(sessao, usuario)
         sessao.commit()
 
-    claims = obter_claims_jwt_usuario(sessao, usuario)
-    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = security.criar_access_token(
-        data=claims,
-        expires_delta=access_token_expires,
-    )
-    return Token(access_token=access_token, token_type="bearer", requires_2fa=False)
+    return emitir_par_tokens(sessao, usuario)
 
 
 def logar_com_microsoft(dados: MicrosoftAuthRequest, sessao: Session) -> Token:
@@ -629,13 +738,7 @@ def logar_com_microsoft(dados: MicrosoftAuthRequest, sessao: Session) -> Token:
             provisionar_estrutura_inicial_usuario(sessao, usuario)
         sessao.commit()
 
-    claims = obter_claims_jwt_usuario(sessao, usuario)
-    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = security.criar_access_token(
-        data=claims,
-        expires_delta=access_token_expires,
-    )
-    return Token(access_token=access_token, token_type="bearer", requires_2fa=False)
+    return emitir_par_tokens(sessao, usuario)
 
 
 def troca_user2famethods(sessao: Session, id_prof: int, tipo: Tipo2FA, email: str):
@@ -705,6 +808,7 @@ def deletaProfessor(
         sessao.execute(delete(alunos).where(alunos.id_prof == id_prof))
         sessao.execute(delete(turmas).where(turmas.id_prof == id_prof))
         sessao.execute(delete(PasswordResetCode).where(PasswordResetCode.id_prof == id_prof))
+        sessao.execute(delete(RefreshToken).where(RefreshToken.id_prof == id_prof))
         sessao.execute(delete(user2facodes).where(user2facodes.id_prof == id_prof))
         sessao.execute(delete(user2famethods).where(user2famethods.id_prof == id_prof))
         sessao.execute(delete(User_esc).where(User_esc.fk_Usuario_id_usuario == id_prof))

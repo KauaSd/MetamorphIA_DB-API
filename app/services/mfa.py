@@ -169,11 +169,10 @@ def verificar2fa(
         )
     usuario = sessao.get(professores, int(id_prof))
     if usuario:
-        from services.users import obter_claims_jwt_usuario
+        from services.users import emitir_par_tokens
 
-        claims = obter_claims_jwt_usuario(sessao, usuario)
-    else:
-        claims = {"sub": str(id_prof), "id_prof": int(id_prof), "is_verified": True}
+        return emitir_par_tokens(sessao, usuario)
+    claims = {"sub": str(id_prof), "id_prof": int(id_prof), "is_verified": True}
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = security.criar_access_token(
         data=claims,

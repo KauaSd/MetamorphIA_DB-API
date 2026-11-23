@@ -1,11 +1,11 @@
 import io
 import json
-from typing import Annotated
+from typing import Annotated, Optional
 import zipfile
 from config.settings import settings
 from database import OperationalError, Session, Tipo2FA, pegar_bd, professores
 from dependencies import pegar_professor_logado, pegar_usuario_pendente_2fa
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Cookie, Depends, Request, Response
 from schemas.schemas import (
     AlterarSenhaRequest,
     GoogleAuthRequest,
@@ -16,6 +16,7 @@ from schemas.schemas import (
     Professoredita,
     RecuperarSenhaRequest,
     RedefinirSenhaRequest,
+    RefreshTokenRequest,
     Token,
     Validar2FARequest,
     VerificarCodigoSenhaRequest,
@@ -77,6 +78,18 @@ def logar_microsoft(
     sessao: Annotated[Session, Depends(pegar_bd)],
 ) -> Token:
     return users.logar_com_microsoft(dados, sessao)
+
+
+@Auth_router.post("/refresh")
+@limiter.limit("20/minute")
+def renovar_token(
+    request: Request,
+    sessao: Annotated[Session, Depends(pegar_bd)],
+    dados: Optional[RefreshTokenRequest] = None,
+    refresh_token_cookie: Optional[str] = Cookie(default=None, alias="refresh_token"),
+) -> Token:
+    token_raw = (dados.refresh_token if dados else None) or refresh_token_cookie
+    return users.renovar_tokens_por_refresh(sessao, token_raw)
 
 
 @Auth_router.post("/ativar2fa")

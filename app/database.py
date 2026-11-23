@@ -280,6 +280,16 @@ class ArquivoAnexo(base):
     criado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class RefreshToken(base):
+    __tablename__ = "refresh_tokens"
+    jti = Column(String(64), primary_key=True)
+    id_prof = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=False, index=True)
+    token_version = Column(Integer, nullable=False, default=1)
+    expira_em = Column(DateTime(timezone=True), nullable=False)
+    revogado = Column(Boolean, nullable=False, default=False)
+    criado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 # Aliases de classes para manter 100% de compatibilidade com imports legados
 professores = Usuario
 turmas = Turma
