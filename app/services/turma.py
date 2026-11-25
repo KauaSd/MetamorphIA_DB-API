@@ -73,21 +73,24 @@ def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
         raise
     except IntegrityError as e:
         sessao.rollback()
+        print(f"[Turma] IntegrityError em AdicionarTurma: {e}")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Erro: Turma já cadastrada ou dados obrigatórios ausentes. Erro:{e}",
+            detail="Turma já cadastrada ou dados obrigatórios ausentes.",
         )
     except OperationalError as e:
         sessao.rollback()
+        print(f"[Turma] OperationalError em AdicionarTurma: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+            detail="Banco de dados temporariamente indisponível.",
         )
     except Exception as e:
         sessao.rollback()
+        print(f"[Turma] Erro interno em AdicionarTurma: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro:{e}",
+            detail="Erro interno ao cadastrar turma.",
         )
 
 
@@ -126,9 +129,10 @@ def EditarTurma(sessao: Session, id_turma: int, form: TurmaRequest, id_prof: int
         raise
     except Exception as e:
         sessao.rollback()
+        print(f"[Turma] Erro interno em EditarTurma: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro:{e}",
+            detail="Erro interno ao editar turma.",
         )
 
 
@@ -163,14 +167,16 @@ def DeletaTurma(sessao: Session, id_turma: int, id_prof: int):
     except HTTPException:
         raise
     except OperationalError as e:
+        print(f"[Turma] OperationalError em DeletaTurma: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+            detail="Banco de dados temporariamente indisponível.",
         )
     except Exception as e:
+        print(f"[Turma] Erro interno em DeletaTurma: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro:{e}",
+            detail="Erro interno ao remover turma.",
         )
 
 
@@ -188,12 +194,14 @@ def PesquisarTurma(sessao: Session, pesquisa: str, id_prof: int):
         result = sessao.execute(query).scalars().all()
         return result
     except OperationalError as e:
+        print(f"[Turma] OperationalError em PesquisarTurma: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+            detail="Banco de dados temporariamente indisponível.",
         )
     except Exception as e:
+        print(f"[Turma] Erro interno em PesquisarTurma: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro:{e}",
+            detail="Erro interno ao pesquisar turmas.",
         )

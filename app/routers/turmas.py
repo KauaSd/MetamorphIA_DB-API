@@ -51,7 +51,16 @@ def pesquisar(
     sessao: Session = Depends(pegar_bd),
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
-    return PesquisarTurma(sessao, nome_turma.nome, professor_logado.id_prof)
+    lista = PesquisarTurma(sessao, nome_turma.nome, professor_logado.id_prof)
+    return [
+        {
+            "id_turma": t.id_turma,
+            "nome_turma": t.nome_turma,
+            "id_prof": t.id_prof,
+            "id_escola": t.fk_Escola_id_escola,
+        }
+        for t in lista
+    ]
 
 
 @Turma_router.get("")

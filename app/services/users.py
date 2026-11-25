@@ -152,6 +152,7 @@ def provisionar_estrutura_inicial_usuario(
 def resolver_perfil_e_tela(sessao: Session, usuario: Usuario) -> dict[str, Any]:
     """Determina o perfil de acesso (professor, admin_escola, admin_rede, admin_sistema) e a tela inicial."""
     tipo = usuario.tipo_usuario or "normal"
+    modo_ativo = getattr(usuario, "modo_ativo", "adm") or "adm"
     escola_adm_id: Optional[int] = None
 
     if tipo == "adm_sistema":
@@ -183,6 +184,12 @@ def resolver_perfil_e_tela(sessao: Session, usuario: Usuario) -> dict[str, Any]:
                     break
         if escola_adm_id is None and vinc_escs:
             escola_adm_id = vinc_escs[0].fk_Escola_id_escola
+        if modo_ativo == "professor":
+            return {
+                "perfil": "professor",
+                "tela_inicial": "painel_professor",
+                "escola_adm_id": escola_adm_id,
+            }
         return {
             "perfil": "admin_escola",
             "tela_inicial": "painel_adm_escola",
@@ -251,8 +258,11 @@ def obter_claims_jwt_usuario(sessao: Session, usuario: Usuario) -> dict[str, Any
         plano_principal = "institucional"
 
     pode_chat = True
+    modo_ativo = getattr(usuario, "modo_ativo", "adm") or "adm"
     if usuario.tipo_usuario == "adm_institucional":
         pode_chat = False
+    elif usuario.tipo_usuario in ("adm_escola", "adm_pro_plus") and modo_ativo == "professor":
+        pode_chat = True
     elif vinc_escs and all(not v.pode_chat for v in vinc_escs):
         pode_chat = False
 
@@ -264,6 +274,7 @@ def obter_claims_jwt_usuario(sessao: Session, usuario: Usuario) -> dict[str, Any
         "id_prof": usuario.id_usuario,
         "email": usuario.email_usuario,
         "tipo_usuario": usuario.tipo_usuario,
+        "modo_ativo": modo_ativo,
         "perfil": perfil_info["perfil"],
         "tela_inicial": perfil_info["tela_inicial"],
         "escola_adm_id": perfil_info["escola_adm_id"],
@@ -272,6 +283,7 @@ def obter_claims_jwt_usuario(sessao: Session, usuario: Usuario) -> dict[str, Any
         "pode_chat": pode_chat,
         "tags": tags_lista,
         "is_verified": True,
+        "purpose": "access",
         "tv": int(getattr(usuario, "token_version", None) or 1),
     }
 
@@ -325,11 +337,7 @@ def renovar_tokens_por_refresh(sessao: Session, refresh_token_raw: Optional[str]
             headers={"WWW-Authenticate": "Bearer"},
         )
     try:
-        payload = jwt.decode(
-            refresh_token_raw.strip(),
-            settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM],
-        )
+        payload = security.decodificar_jwt_padrao(refresh_token_raw.strip())
     except jwt.InvalidTokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -402,6 +410,8 @@ def obter_perfil_completo_usuario(sessao: Session, usuario: Usuario) -> dict[str
     escolas = listar_escolas_usuario(sessao, usuario)
     eh_adm_sistema = usuario.tipo_usuario == "adm_sistema"
     eh_adm_rede = usuario.tipo_usuario == "adm_institucional"
+    modo_ativo = getattr(usuario, "modo_ativo", "adm") or "adm"
+    eh_adm_escola_ativo = usuario.tipo_usuario in ("adm_escola", "adm_pro_plus") and modo_ativo != "professor"
     eh_adm_alguma_escola = any(e.get("papel") == "adm" for e in escolas)
 
     return {
@@ -410,6 +420,7 @@ def obter_perfil_completo_usuario(sessao: Session, usuario: Usuario) -> dict[str
         "email_usuario": usuario.email_usuario,
         "telefone_usuario": usuario.telefone_usuario,
         "tipo_usuario": usuario.tipo_usuario,
+        "modo_ativo": modo_ativo,
         "instrucoes_ia": getattr(usuario, "instrucoes_ia", None) or "",
         "perfil": claims["perfil"],
         "tela_inicial": claims["tela_inicial"],
@@ -422,13 +433,62 @@ def obter_perfil_completo_usuario(sessao: Session, usuario: Usuario) -> dict[str
         "permissoes": {
             "eh_admin_sistema": eh_adm_sistema,
             "eh_admin_rede": eh_adm_rede,
-            "pode_acessar_painel_adm": eh_adm_sistema or eh_adm_rede or usuario.tipo_usuario in ("adm_escola", "adm_pro_plus"),
-            "pode_gerenciar_professores": eh_adm_rede or usuario.tipo_usuario in ("adm_escola", "adm_pro_plus"),
+            "pode_alternar_modo_professor": usuario.tipo_usuario in ("adm_escola", "adm_pro_plus"),
+            "pode_acessar_painel_adm": eh_adm_sistema or eh_adm_rede or eh_adm_escola_ativo,
+            "pode_gerenciar_professores": eh_adm_rede or eh_adm_escola_ativo,
             "pode_gerenciar_alunos": eh_adm_sistema or eh_adm_rede or eh_adm_alguma_escola,
             "pode_gerenciar_turmas": eh_adm_sistema or eh_adm_rede or eh_adm_alguma_escola,
             "pode_criar_escolas": eh_adm_rede or usuario.tipo_usuario == "normal",
             "pode_chat": claims["pode_chat"],
         },
+    }
+
+
+def alternar_modo_usuario(
+    sessao: Session,
+    usuario_logado: Usuario,
+    modo_desejado: Optional[str] = None,
+) -> dict[str, Any]:
+    """Permite ao ADM de escola institucional (não-rede) alternar entre modo 'adm' e 'professor'."""
+    from services.planos import invalidar_cache_permissoes
+
+    usuario = sessao.get(Usuario, usuario_logado.id_usuario)
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    if usuario.tipo_usuario not in ("adm_escola", "adm_pro_plus"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador da escola (Institucional) pode alternar para o modo professor.",
+        )
+
+    modo_atual = getattr(usuario, "modo_ativo", "adm") or "adm"
+    if modo_desejado is None or not str(modo_desejado).strip():
+        novo_modo = "professor" if modo_atual != "professor" else "adm"
+    else:
+        novo_modo = str(modo_desejado).strip().lower()
+        if novo_modo not in ("adm", "professor"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Modo inválido. Utilize 'adm' ou 'professor'.",
+            )
+
+    usuario.modo_ativo = novo_modo
+    sessao.commit()
+    sessao.refresh(usuario)
+    invalidar_cache_permissoes()
+
+    claims = obter_claims_jwt_usuario(sessao, usuario)
+    novo_token = security.criar_access_token(
+        data=claims,
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    perfil = obter_perfil_completo_usuario(sessao, usuario)
+    return {
+        "mensagem": f"Modo alterado para '{novo_modo}' com sucesso.",
+        "modo_ativo": novo_modo,
+        "access_token": novo_token,
+        "token_type": "bearer",
+        "perfil": perfil,
     }
 
 
@@ -473,21 +533,24 @@ def cria_prof(sessao: Session, dados: Professor) -> dict[str, Any]:
         }
     except IntegrityError as e:
         sessao.rollback()
+        print(f"[Users] IntegrityError em cria_prof: {e}")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Erro: Este professor já está cadastrado ou dados obrigatórios estão ausentes. Erro: {e}",
+            detail="Este professor já está cadastrado ou dados obrigatórios estão ausentes.",
         )
     except OperationalError as e:
         sessao.rollback()
+        print(f"[Users] OperationalError em cria_prof: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro: {e}",
+            detail="Banco de dados temporariamente indisponível.",
         )
     except Exception as e:
         sessao.rollback()
+        print(f"[Users] Erro interno em cria_prof: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro: {e}",
+            detail="Erro interno ao processar cadastro.",
         )
 
 
@@ -764,11 +827,16 @@ def troca_user2famethods(sessao: Session, id_prof: int, tipo: Tipo2FA, email: st
 
 def fn_confirma_totp(sessao: Session, id_prof: int):
     mfa = sessao.query(user2famethods).filter(user2famethods.id_prof == id_prof).first()
-    if mfa:
-        mfa.usa_verificacao = True
-        sessao.commit()
-        sessao.refresh(mfa)
-    return mfa
+    if not mfa:
+        raise HTTPException(status_code=404, detail="Configuração de segundo fator não encontrada.")
+    mfa.usa_verificacao = True
+    sessao.commit()
+    sessao.refresh(mfa)
+    return {
+        "mensagem": "Verificação em duas etapas confirmada com sucesso.",
+        "tipo": mfa.tipo,
+        "usa_verificacao": bool(mfa.usa_verificacao),
+    }
 
 
 def deletaProfessor(
@@ -836,14 +904,16 @@ def deletaProfessor(
     except HTTPException:
         raise
     except OperationalError as e:
+        print(f"[Users] OperationalError em deletaProfessor: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+            detail="Banco de dados temporariamente indisponível.",
         )
     except Exception as e:
+        print(f"[Users] Erro interno em deletaProfessor: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro: {e}",
+            detail="Erro interno ao remover professor.",
         )
 
 
@@ -874,14 +944,16 @@ def EditaProfessor(
         return {"mensagem": "Professor editado com sucesso", "instrucoes_ia": professor.instrucoes_ia or ""}
 
     except OperationalError as e:
+        print(f"[Users] OperationalError em EditaProfessor: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+            detail="Banco de dados temporariamente indisponível.",
         )
     except Exception as e:
+        print(f"[Users] Erro interno em EditaProfessor: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro: {e}",
+            detail="Erro interno ao editar perfil.",
         )
 
 

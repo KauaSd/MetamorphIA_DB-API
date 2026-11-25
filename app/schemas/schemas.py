@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import Enum
 import re
 from typing import Annotated, List, Optional
@@ -101,7 +102,11 @@ class Alunoschema(BaseModel):
     neurodiv_aluno: str
     id_turma: int
     desc_aluno: Optional[str] = None
+    perfil_ia: Optional[str] = None
     idade_aluno: Optional[int] = None
+    pei_feito: bool = False
+    pei_valido_ate: Optional[datetime] = None
+    pei_ativo: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -221,12 +226,7 @@ class ContratarPlanoRequest(BaseModel):
     id_escola: Optional[int] = Field(None, gt=0)
     nome_grupo: Optional[str] = Field(None, max_length=150)
     escolas_ids: Optional[List[int]] = None
-    max_qtd_user: Optional[int] = Field(None, ge=1, le=10000)
-    max_qtd_turmas: Optional[int] = Field(None, ge=1, le=10000)
-    max_qtd_alunos: Optional[int] = Field(None, ge=1, le=10000)
-    max_qtd_escolas: Optional[int] = Field(None, ge=1, le=10000)
     adm_pode_chat: Optional[bool] = True
-    valor_contrato: Optional[float] = Field(None, gt=0)
 
 
 class AdicionarProfessorRequest(BaseModel):
@@ -273,3 +273,10 @@ class SincronizarPagamentoRequest(BaseModel):
 
 class AtualizarPerfilUsuarioRequest(BaseModel):
     tipo_usuario: str = Field(..., max_length=50)
+
+
+class AlternarModoRequest(BaseModel):
+    modo: Optional[str] = Field(
+        default=None,
+        description="Opcional: 'professor' ou 'adm'. Se omitido, alterna entre os dois modos.",
+    )

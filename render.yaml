@@ -44,3 +44,17 @@ services:
         sync: false
       - key: TWILIO_CONTENT_SID
         sync: false
+      - key: STORAGE_DIR
+        value: /tmp/metamorphia_storage
+      - key: MP_ACCESS_TOKEN
+        sync: false
+      - key: MP_WEBHOOK_SECRET
+        sync: false
+      - key: MP_NOTIFICATION_URL
+        sync: false
+      - key: MP_SUCCESS_URL
+        sync: false
+      - key: MP_FAILURE_URL
+        sync: false
+      - key: MP_PENDING_URL
+        sync: false

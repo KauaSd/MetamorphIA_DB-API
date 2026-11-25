@@ -79,15 +79,13 @@ def pegar_professor_logado(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-        )
+        payload = security.decodificar_jwt_padrao(token)
         id_prof = payload.get("sub")
         is_verified = payload.get("is_verified")
-        if id_prof is None or not is_verified or payload.get("purpose") == "refresh":
+        proposito = payload.get("purpose")
+        if id_prof is None or is_verified is not True or (proposito and proposito != "access"):
             raise credentials_exception
-    except InvalidTokenError as e:
-        print(e)
+    except InvalidTokenError:
         raise credentials_exception
     professor = pegar_usuario_por_id(sessao, int(id_prof))
     if professor is None:
@@ -112,9 +110,7 @@ def pegar_usuario_pendente_2fa(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-        )
+        payload = security.decodificar_jwt_padrao(token)
         id_prof = payload.get("sub")
         tipo_mfa = payload.get("2fa")
 

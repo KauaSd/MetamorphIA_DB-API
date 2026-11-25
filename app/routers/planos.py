@@ -1,6 +1,6 @@
 from database import Session, Usuario, pegar_bd
 from dependencies import pegar_professor_logado
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 from schemas.schemas import (
     AdicionarProfessorRequest,
     AtualizarTagsRequest,
@@ -9,8 +9,14 @@ from schemas.schemas import (
     EditarEscolaRequest,
 )
 import services.planos as fn_planos
+from services.disciplinas import CATALOGO_DISCIPLINAS
 
 Planos_router = APIRouter(tags=["planos-escolas-grupos"])
+
+
+@Planos_router.get("/disciplinas")
+def listar_disciplinas():
+    return CATALOGO_DISCIPLINAS
 
 
 @Planos_router.post("/escolas", status_code=status.HTTP_201_CREATED)
@@ -145,3 +151,54 @@ def atualizar_tags(
     usuario_logado: Usuario = Depends(pegar_professor_logado),
 ):
     return fn_planos.atualizar_tags_professor(sessao, usuario_logado, id_usuario, dados)
+
+
+@Planos_router.get("/escolas/{id_escola}/peis/download")
+def baixar_todos_peis_escola(
+    id_escola: int,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+) -> Response:
+    """Baixa um .zip com todos os PEIs (.docx) dos alunos da escola (exclusivo ADM no modo ADM)."""
+    zip_bytes, nome_zip = fn_planos.exportar_peis_zip_escola(sessao, usuario_logado, id_escola)
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{nome_zip}"'},
+    )
+
+
+@Planos_router.get("/escolas/{id_escola}/turmas/{id_turma}/peis/download")
+def baixar_peis_turma_escola(
+    id_escola: int,
+    id_turma: int,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+) -> Response:
+    """Baixa um .zip com os PEIs (.docx) apenas dos alunos de uma turma específica."""
+    zip_bytes, nome_zip = fn_planos.exportar_peis_zip_escola(
+        sessao, usuario_logado, id_escola, id_turma=id_turma
+    )
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{nome_zip}"'},
+    )
+
+
+@Planos_router.get("/escolas/{id_escola}/alunos/{id_aluno}/peis/download")
+def baixar_peis_aluno_escola(
+    id_escola: int,
+    id_aluno: int,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+) -> Response:
+    """Baixa um .zip com os PEIs (.docx) de um aluno específico da escola."""
+    zip_bytes, nome_zip = fn_planos.exportar_peis_zip_escola(
+        sessao, usuario_logado, id_escola, id_aluno=id_aluno
+    )
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{nome_zip}"'},
+    )

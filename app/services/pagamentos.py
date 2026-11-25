@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import re
 from typing import Any, Optional
 
 from config.settings import settings
@@ -65,6 +66,11 @@ def validar_assinatura_webhook_mp(
     """Valida assinatura HMAC-SHA256 do webhook do Mercado Pago quando MP_WEBHOOK_SECRET estiver configurado."""
     secret = (settings.MP_WEBHOOK_SECRET or "").strip()
     if not secret:
+        if settings.ENVIRONMENT == "production":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Webhook do Mercado Pago não configurado (MP_WEBHOOK_SECRET ausente).",
+            )
         return
 
     if not x_signature:
@@ -136,28 +142,52 @@ def iniciar_checkout_plano(
         )
 
     preco_minimo = PLANOS_PAGOS_PRECOS[nome_plano]
-    valor_final = preco_minimo
-    if dados.valor_contrato is not None:
-        if dados.valor_contrato < preco_minimo:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Valor informado ({dados.valor_contrato}) é inferior ao preço do plano ({preco_minimo}).",
-            )
-        valor_final = float(dados.valor_contrato)
+    valor_final = float(preco_minimo)
 
     _exigir_mp_access_token()
     usuario.cpf_cnpj = doc_limpo
     plano_obj = planos[nome_plano]
-    provisionar_estrutura_inicial_usuario(sessao, usuario)
+    grupo_principal, _esc_ini, _cont_ini = provisionar_estrutura_inicial_usuario(sessao, usuario)
+
+    from database import Escola, User_esc
+
+    if dados.id_escola is not None:
+        esc_alvo = sessao.get(Escola, dados.id_escola)
+        if not esc_alvo:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Escola informada para o plano não encontrada.",
+            )
+        vinc_adm = sessao.execute(
+            select(User_esc).where(
+                User_esc.fk_Usuario_id_usuario == usuario.id_usuario,
+                User_esc.fk_Escola_id_escola == esc_alvo.id_escola,
+                User_esc.papel == "adm",
+            )
+        ).scalars().first()
+        if esc_alvo.fk_Grupo_id_grupo != grupo_principal.id_grupo and not vinc_adm:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Você não tem permissão para vincular contratos a uma escola de terceiros.",
+            )
+
+    if dados.escolas_ids:
+        for esc_id in dados.escolas_ids:
+            esc_item = sessao.get(Escola, esc_id)
+            if not esc_item or esc_item.fk_Grupo_id_grupo != grupo_principal.id_grupo:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Uma ou mais escolas informadas não pertencem ao seu grupo.",
+                )
 
     if nome_plano == "pro":
         contrato = Contrato(
             tipo_cont=tipo_cont,
             documento_cont=doc_limpo,
             max_qtd_user=1,
-            max_qtd_escolas=dados.max_qtd_escolas or plano_obj.max_escolas,
-            max_qtd_turmas=plano_obj.max_turmas_por_escola,
-            max_qtd_alunos=plano_obj.max_alunos_por_turma,
+            max_qtd_escolas=plano_obj.max_escolas or 10,
+            max_qtd_turmas=plano_obj.max_turmas_por_escola or 5,
+            max_qtd_alunos=plano_obj.max_alunos_por_turma or 10,
             valor_contrato=valor_final,
             fk_Plano_id_plano=plano_obj.id_plano,
             status_contrato="pendente",
@@ -167,10 +197,10 @@ def iniciar_checkout_plano(
             tipo_cont=tipo_cont,
             documento_cont=doc_limpo,
             email_institucional=dados.email_institucional,
-            max_qtd_user=dados.max_qtd_user or 5,
+            max_qtd_user=5,
             max_qtd_escolas=1,
-            max_qtd_turmas=dados.max_qtd_turmas or 10,
-            max_qtd_alunos=dados.max_qtd_alunos or 30,
+            max_qtd_turmas=10,
+            max_qtd_alunos=30,
             valor_contrato=valor_final,
             fk_Plano_id_plano=plano_obj.id_plano,
             status_contrato="pendente",
@@ -180,10 +210,10 @@ def iniciar_checkout_plano(
             tipo_cont=tipo_cont,
             documento_cont=doc_limpo,
             email_institucional=dados.email_institucional,
-            max_qtd_user=dados.max_qtd_user or 50,
-            max_qtd_escolas=dados.max_qtd_escolas or 20,
-            max_qtd_turmas=dados.max_qtd_turmas or 20,
-            max_qtd_alunos=dados.max_qtd_alunos or 40,
+            max_qtd_user=50,
+            max_qtd_escolas=20,
+            max_qtd_turmas=20,
+            max_qtd_alunos=40,
             valor_contrato=valor_final,
             fk_Plano_id_plano=plano_obj.id_plano,
             status_contrato="pendente",
@@ -274,9 +304,10 @@ def iniciar_checkout_plano(
         mp_data = resp.json()
     except httpx.HTTPError as exc:
         sessao.rollback()
+        print(f"[Pagamentos] Erro ao criar preferência no Mercado Pago: {exc}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Erro ao criar preferência de pagamento no Mercado Pago: {exc}",
+            detail="Erro ao criar preferência de pagamento no provedor externo.",
         ) from exc
 
     pgto.mp_preference_id = mp_data.get("id")
@@ -348,7 +379,7 @@ def processar_notificacao_mercadopago(
 ) -> dict[str, Any]:
     """Consulta o pagamento no Mercado Pago e atualiza contrato/permissões de forma idempotente."""
     payment_id_str = str(payment_id).strip()
-    if not payment_id_str:
+    if not payment_id_str or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", payment_id_str):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="payment_id inválido.",
@@ -365,14 +396,16 @@ def processar_notificacao_mercadopago(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(status_code=404, detail="Pagamento não encontrado no Mercado Pago.")
+        print(f"[Pagamentos] Erro HTTP Mercado Pago ({exc.response.status_code}): {exc}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Erro ao consultar pagamento no Mercado Pago: {exc}",
+            detail="Erro ao consultar status do pagamento no provedor externo.",
         ) from exc
     except httpx.HTTPError as exc:
+        print(f"[Pagamentos] Falha de conexão Mercado Pago: {exc}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Falha de comunicação com Mercado Pago: {exc}",
+            detail="Falha de comunicação com o provedor de pagamentos.",
         ) from exc
 
     mp_status = (mp_payment.get("status") or "").strip().lower()

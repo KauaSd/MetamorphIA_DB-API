@@ -39,11 +39,19 @@ def troca_user2famethods(sessao: Session, id_prof: int, tipo: Tipo2FA, email: st
 
 def fn_confirma_totp(sessao: Session, id_prof: int):
     mfa = sessao.query(user2famethods).filter(user2famethods.id_prof == id_prof).first()
-    if mfa:
-        mfa.usa_verificacao = True
-        sessao.commit()
-        sessao.refresh(mfa)
-    return mfa
+    if not mfa:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Configuração de segundo fator não encontrada.",
+        )
+    mfa.usa_verificacao = True
+    sessao.commit()
+    sessao.refresh(mfa)
+    return {
+        "mensagem": "Verificação em duas etapas confirmada com sucesso.",
+        "tipo": mfa.tipo,
+        "usa_verificacao": bool(mfa.usa_verificacao),
+    }
 
 def envia_token(sessao: Session, id_prof: int):
     mfa = sessao.query(user2famethods).filter(user2famethods.id_prof == id_prof).first()
@@ -172,7 +180,13 @@ def verificar2fa(
         from services.users import emitir_par_tokens
 
         return emitir_par_tokens(sessao, usuario)
-    claims = {"sub": str(id_prof), "id_prof": int(id_prof), "is_verified": True}
+    claims = {
+        "sub": str(id_prof),
+        "id_prof": int(id_prof),
+        "is_verified": True,
+        "pode_chat": True,
+        "purpose": "access",
+    }
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = security.criar_access_token(
         data=claims,

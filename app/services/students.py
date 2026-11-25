@@ -57,14 +57,16 @@ def DeletaAluno(id_aluno: int, sessao: Session, id_prof: int):
     except HTTPException:
         raise
     except OperationalError as e:
+        print(f"[Students] OperationalError em DeletaAluno: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+            detail="Banco de dados temporariamente indisponível.",
         )
     except Exception as e:
+        print(f"[Students] Erro interno em DeletaAluno: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro: {e}",
+            detail="Erro interno ao remover aluno.",
         )
 
 
@@ -112,21 +114,24 @@ def RecebeAluno(form: Aluno, sessao: Session, id_prof: int):
         raise
     except IntegrityError as e:
         sessao.rollback()
+        print(f"[Students] IntegrityError em RecebeAluno: {e}")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"aluno já cadastrado ou dados obrigatórios ausentes. Erro: {e}",
+            detail="Aluno já cadastrado ou dados obrigatórios ausentes.",
         )
     except OperationalError as e:
         sessao.rollback()
+        print(f"[Students] OperationalError em RecebeAluno: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+            detail="Banco de dados temporariamente indisponível.",
         )
     except Exception as e:
         sessao.rollback()
+        print(f"[Students] Erro interno em RecebeAluno: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro: {e}",
+            detail="Erro interno ao cadastrar aluno.",
         )
 
 
@@ -147,14 +152,16 @@ def ConsultaAluno(pesquisaAluno: PesquisaAluno, sessao: Session, id_prof: int):
         result = sessao.execute(query).scalars().all()
         return result
     except OperationalError as e:
+        print(f"[Students] OperationalError em DeletaAluno: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+            detail="Banco de dados temporariamente indisponível.",
         )
     except Exception as e:
+        print(f"[Students] Erro interno em DeletaAluno: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro: {e}",
+            detail="Erro interno ao remover aluno.",
         )
 
 
@@ -202,12 +209,14 @@ def EditaAluno(
         sessao.refresh(aluno)
         return {"mensagem": "Aluno editado com sucesso"}
     except OperationalError as e:
+        print(f"[Students] OperationalError em DeletaAluno: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro: Banco de dados indisponivel. Erro:{e}",
+            detail="Banco de dados temporariamente indisponível.",
         )
     except Exception as e:
+        print(f"[Students] Erro interno em DeletaAluno: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro interno. Erro: {e}",
+            detail="Erro interno ao remover aluno.",
         )

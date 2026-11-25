@@ -111,6 +111,50 @@ def _deletar_supabase(caminho_supabase: str) -> None:
         pass
 
 
+def ler_bytes_registro_anexo(reg: ArquivoAnexo) -> bytes:
+    """Lê os bytes de um ArquivoAnexo (Supabase Storage ou disco local) após validação de permissão."""
+    if reg.caminho_arquivo.startswith("supabase://"):
+        return _download_supabase(reg.caminho_arquivo)
+
+    caminho = Path(reg.caminho_arquivo)
+    if not caminho.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Arquivo físico não encontrado no armazenamento.",
+        )
+    return caminho.read_bytes()
+
+
+def extrair_texto_docx_bytes_storage(conteudo_bytes: bytes) -> str:
+    """Extrai o texto legível de um arquivo .docx salvo no storage com proteção contra Zip/XML Bomb."""
+    import io
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns = {"w": w_ns}
+    try:
+        with zipfile.ZipFile(io.BytesIO(conteudo_bytes), "r") as zin:
+            infos = zin.infolist()
+            if len(infos) > 200 or sum(i.file_size for i in infos) > 25 * 1024 * 1024:
+                return ""
+            if "word/document.xml" not in zin.namelist():
+                return ""
+            xml_bytes = zin.read("word/document.xml")
+        cabecalho_xml = xml_bytes[:4096].upper()
+        if b"<!ENTITY" in cabecalho_xml or b"<!DOCTYPE" in cabecalho_xml:
+            return ""
+        tree = ET.fromstring(xml_bytes)
+        paragrafos: list[str] = []
+        for p in tree.findall(".//w:p", ns):
+            texto_p = "".join(t.text for t in p.findall(".//w:t", ns) if t.text).strip()
+            if texto_p:
+                paragrafos.append(texto_p)
+        return "\n".join(paragrafos)
+    except Exception:
+        return ""
+
+
 def salvar_arquivo_anexo(
     sessao: Session,
     id_prof: int,
@@ -119,6 +163,8 @@ def salvar_arquivo_anexo(
     nome_arquivo: str,
     mime_type: str,
     data_url_ou_b64: Optional[str],
+    file_id_override: Optional[str] = None,
+    download_url_override: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Salva os bytes no Supabase Storage (ou pasta local em dev) e registra metadados no banco."""
     if not data_url_ou_b64:
@@ -132,7 +178,7 @@ def salvar_arquivo_anexo(
             detail="Arquivo excede o limite máximo permitido de 10 MB.",
         )
 
-    file_id = str(uuid.uuid4())
+    file_id = file_id_override or str(uuid.uuid4())
     nome_seguro = _sanitizar_nome_arquivo(nome_arquivo)
     mime = mime_type or "application/octet-stream"
 
@@ -168,7 +214,7 @@ def salvar_arquivo_anexo(
         "name": reg.nome_arquivo,
         "type": reg.mime_type,
         "size": reg.tamanho_bytes,
-        "download_url": f"/AI/arquivos/{file_id}",
+        "download_url": download_url_override or f"/AI/arquivos/{file_id}",
     }
 
 
@@ -193,16 +239,7 @@ def obter_arquivo_anexo(
             detail="Você não tem permissão para acessar este arquivo.",
         )
 
-    if reg.caminho_arquivo.startswith("supabase://"):
-        return reg, _download_supabase(reg.caminho_arquivo)
-
-    caminho = Path(reg.caminho_arquivo)
-    if not caminho.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Arquivo físico não encontrado no armazenamento.",
-        )
-    return reg, caminho.read_bytes()
+    return reg, ler_bytes_registro_anexo(reg)
 
 
 def _remover_registros_e_arquivos(sessao: Session, registros: list[ArquivoAnexo]) -> None:

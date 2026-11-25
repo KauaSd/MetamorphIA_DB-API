@@ -8,12 +8,11 @@ if _APP_DIR not in sys.path:
 from config.settings import settings
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from security import limiter
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 
-limiter = Limiter(key_func=get_remote_address, default_limits=[settings.RATE_LIMIT_DEFAULT])
 _eh_producao = settings.ENVIRONMENT == "production"
 
 app = FastAPI(
@@ -60,6 +59,23 @@ app.include_router(Turma_router)
 
 
 @app.get("/health", tags=["health"])
-async def health() -> dict[str, str]:
-    """Endpoint de verificação de integridade para o Render."""
-    return {"status": "ok", "service": "api-db"}
+async def health() -> Response:
+    """Endpoint de verificação de integridade com teste real de conectividade ao banco."""
+    import json
+    from database import engine
+    from sqlalchemy import text
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return Response(
+            content=json.dumps({"status": "ok", "service": "api-db", "database": "ok"}),
+            media_type="application/json",
+            status_code=200,
+        )
+    except Exception:
+        return Response(
+            content=json.dumps({"status": "degraded", "service": "api-db", "database": "unreachable"}),
+            media_type="application/json",
+            status_code=503,
+        )

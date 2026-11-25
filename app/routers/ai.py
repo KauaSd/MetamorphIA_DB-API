@@ -1,17 +1,23 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 from typing import Annotated, Any, Optional
+from urllib.parse import quote
+import uuid
 
 from database import (
+    ArquivoAnexo,
     Session,
     Turma,
+    VALIDADE_PEI_DIAS,
     alunos,
     conversas,
     delete,
     mensagem_al,
     mensagens,
     pegar_bd,
+    pei_esta_valido,
     select,
 )
 from dependencies import pegar_professor_logado, security_scheme
@@ -20,9 +26,12 @@ from fastapi.security import HTTPAuthorizationCredentials
 import httpx
 from config.settings import settings
 from pydantic import BaseModel, Field
+from services.disciplinas import registrar_status_pei_disciplina
 from services.planos import obter_contexto_escola
 from services.storage import (
     excluir_arquivos_por_conversa,
+    extrair_texto_docx_bytes_storage,
+    ler_bytes_registro_anexo,
     obter_arquivo_anexo,
     salvar_arquivo_anexo,
 )
@@ -167,33 +176,79 @@ def _obter_headers(token: str) -> dict[str, str]:
     return headers
 
 
-def _validar_acesso_chat_professor_aluno(
-    sessao: Session, professor: Any, id_aluno: int
-) -> None:
-    """Garante que o usuário tem permissão de chat para o aluno (bloqueando adm_institucional e adm_pro_plus sem pode_chat)."""
+def _obter_e_validar_aluno_ia(
+    sessao: Session, professor: Any, id_aluno: int, exigir_pode_chat: bool = True
+) -> Any:
+    """Valida existência do aluno, vínculo com a escola do usuário e permissão pedagógica (pode_chat)."""
     tipo_user = getattr(professor, "tipo_usuario", "normal")
-    if tipo_user == "adm_institucional":
+    if exigir_pode_chat and tipo_user == "adm_institucional":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="O administrador institucional não pode acessar ou conversar no chat dos alunos.",
         )
 
-    try:
-        aluno_obj = sessao.get(alunos, id_aluno)
-    except Exception:
-        sessao.rollback()
-        aluno_obj = None
-    if aluno_obj and aluno_obj.fk_Turma_id_turma:
+    aluno_obj = sessao.get(alunos, id_aluno)
+    if not aluno_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Aluno não encontrado.",
+        )
+
+    if tipo_user == "adm_sistema":
+        return aluno_obj
+
+    if aluno_obj.fk_Turma_id_turma:
         turma_obj = sessao.get(Turma, aluno_obj.fk_Turma_id_turma)
-        if turma_obj and turma_obj.fk_Escola_id_escola:
-            ctx = obter_contexto_escola(
-                sessao, professor.id_prof, turma_obj.fk_Escola_id_escola
+        if not turma_obj:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Turma do aluno não encontrada.",
             )
-            if not ctx["pode_chat"]:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Este administrador Pro+ está configurado sem acesso ao chat dos alunos nesta escola.",
-                )
+        ctx = obter_contexto_escola(
+            sessao, professor.id_prof, turma_obj.fk_Escola_id_escola
+        )
+        if exigir_pode_chat and not ctx.get("pode_chat", False):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Este administrador está configurado sem acesso ao chat dos alunos nesta escola.",
+            )
+    elif aluno_obj.id_prof != professor.id_prof:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Você não tem permissão para acessar os dados deste aluno.",
+        )
+    return aluno_obj
+
+
+def _validar_acesso_chat_professor_aluno(
+    sessao: Session, professor: Any, id_aluno: int
+) -> Any:
+    """Garante que o usuário tem permissão de chat para o aluno e retorna o registro do aluno."""
+    return _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=True)
+
+
+def _exigir_pei_valido_para_chat(aluno_obj: Any) -> None:
+    """Impede o uso do chat enquanto o PEI não for concluído ou se a validade bimestral (60 dias) expirou."""
+    if not pei_esta_valido(aluno_obj):
+        if getattr(aluno_obj, "pei_feito", False):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="A validade bimestral (60 dias) do PEI deste aluno expirou. Renove o PEI antes de conversar no chat.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="É obrigatório concluir o PEI deste aluno antes de conversar com a IA.",
+        )
+
+
+def _validar_segmento_id_seguro(valor: str, nome: str = "identificador") -> str:
+    limpo = (valor or "").strip()
+    if not limpo or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", limpo):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Formato inválido para {nome}.",
+        )
+    return quote(limpo, safe="")
 
 
 async def _encaminhar_requisicao_ia(
@@ -220,14 +275,22 @@ async def _encaminhar_requisicao_ia(
             resposta.raise_for_status()
             return resposta.json()
         except httpx.HTTPStatusError as exc:
+            detalhe = "Erro retornado pelo serviço de IA."
+            try:
+                err_json = exc.response.json()
+                if isinstance(err_json, dict) and err_json.get("detail"):
+                    detalhe = str(err_json["detail"])
+            except Exception:
+                pass
             raise HTTPException(
                 status_code=exc.response.status_code,
-                detail=f"Erro retornado pela API da IA: {exc.response.text}",
+                detail=detalhe,
             ) from exc
         except (httpx.RequestError, httpx.TimeoutException) as exc:
+            print(f"[AI Gateway] Falha ao comunicar com IA ({url}): {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Não foi possível se comunicar com o serviço de IA em {url}. Erro: {exc}",
+                detail="Serviço de Inteligência Artificial temporariamente indisponível.",
             ) from exc
 
 
@@ -240,7 +303,8 @@ async def chat_aluno_ia(
     sessao: Session = Depends(pegar_bd),
 ):
     """Envia uma mensagem pedagógica sobre um aluno para a IA e recebe a resposta adaptada."""
-    _validar_acesso_chat_professor_aluno(sessao, professor, id_aluno)
+    aluno_validado = _validar_acesso_chat_professor_aluno(sessao, professor, id_aluno)
+    _exigir_pei_valido_para_chat(aluno_validado)
 
     cid = payload.conversa_id
     if cid in ("string", "", "null", "None"):
@@ -305,6 +369,7 @@ async def chat_aluno_ia(
         "template_id": payload.template_id,
         "formato_saida": payload.formato_saida or "docx",
         "instrucoes_ia": instrucoes_prof,
+        "persistido_pelo_gateway": True,
     }
     resposta = await _encaminhar_requisicao_ia(
         metodo="POST",
@@ -315,11 +380,17 @@ async def chat_aluno_ia(
 
     try:
         perfil_atualizado = resposta.get("perfil_atualizado")
-        if perfil_atualizado:
+        indicadores = resposta.get("indicadores_desenvolvimento")
+        metas = resposta.get("metas_bimestre")
+        if perfil_atualizado or indicadores is not None or metas is not None:
             aluno_obj = sessao.get(alunos, id_aluno)
             if aluno_obj:
-                aluno_obj.perfil_ia = perfil_atualizado
-                aluno_obj.desc_aluno = perfil_atualizado
+                if perfil_atualizado:
+                    aluno_obj.perfil_ia = perfil_atualizado
+                if indicadores is not None:
+                    aluno_obj.indicadores_desenvolvimento_json = json.dumps(indicadores, ensure_ascii=False)
+                if metas is not None:
+                    aluno_obj.metas_bimestre_json = json.dumps(metas, ensure_ascii=False)
         final_conversa_id = resposta.get("conversa_id") or cid
         if final_conversa_id:
             titulo_chat = (payload.mensagem or "").strip()[:50]
@@ -530,9 +601,10 @@ async def obter_mensagens_conversa_ia(
             "mensagens": lista_msgs,
         }
 
+    cid_seguro = _validar_segmento_id_seguro(conversa_id, "conversa_id")
     return await _encaminhar_requisicao_ia(
         metodo="GET",
-        endpoint=f"/alunos/{id_aluno}/conversas/{conversa_id}",
+        endpoint=f"/alunos/{id_aluno}/conversas/{cid_seguro}",
         token=credentials.credentials,
     )
 
@@ -567,9 +639,10 @@ async def deletar_conversa_aluno_ia(
         sessao.rollback()
 
     try:
+        cid_seguro = _validar_segmento_id_seguro(conversa_id, "conversa_id")
         await _encaminhar_requisicao_ia(
             metodo="DELETE",
-            endpoint=f"/alunos/{id_aluno}/conversas/{conversa_id}",
+            endpoint=f"/alunos/{id_aluno}/conversas/{cid_seguro}",
             token=credentials.credentials,
         )
     except Exception:
@@ -596,15 +669,95 @@ def baixar_arquivo_anexo_chat(
     )
 
 
+DOCX_PEI_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _persistir_pei_e_perfil_gateway(
+    sessao: Session,
+    aluno_obj: Any,
+    id_prof: int,
+    resposta_ia: dict[str, Any],
+    descricao_enviada: Optional[str] = None,
+    componente_curricular: Optional[str] = None,
+) -> dict[str, Any]:
+    """Salva o .docx do PEI no Supabase Storage e atualiza perfil_ia + validade de 60 dias no banco."""
+    pei_id = (resposta_ia.get("pei_id") or str(uuid.uuid4())).strip()
+    docx_b64 = resposta_ia.get("documento_docx_base64")
+    arquivo_nome = resposta_ia.get("arquivo_nome") or f"PEI_aluno_{aluno_obj.id_aluno}_2026.docx"
+
+    if docx_b64 and not sessao.get(ArquivoAnexo, pei_id):
+        salvar_arquivo_anexo(
+            sessao=sessao,
+            id_prof=id_prof,
+            id_aluno=aluno_obj.id_aluno,
+            id_conversa="PEI",
+            nome_arquivo=arquivo_nome,
+            mime_type=DOCX_PEI_MIME,
+            data_url_ou_b64=docx_b64,
+            file_id_override=pei_id,
+            download_url_override=f"/AI/pei/aluno/{aluno_obj.id_aluno}/{pei_id}/docx",
+        )
+
+    if descricao_enviada and not aluno_obj.desc_aluno:
+        aluno_obj.desc_aluno = descricao_enviada
+    perfil_novo = resposta_ia.get("perfil_atualizado")
+    if perfil_novo:
+        aluno_obj.perfil_ia = perfil_novo
+    if resposta_ia.get("indicadores_desenvolvimento") is not None:
+        aluno_obj.indicadores_desenvolvimento_json = json.dumps(
+            resposta_ia["indicadores_desenvolvimento"], ensure_ascii=False
+        )
+    if resposta_ia.get("metas_bimestre") is not None:
+        aluno_obj.metas_bimestre_json = json.dumps(
+            resposta_ia["metas_bimestre"], ensure_ascii=False
+        )
+    if componente_curricular:
+        registrar_status_pei_disciplina(
+            sessao=sessao,
+            id_aluno=aluno_obj.id_aluno,
+            id_prof=id_prof,
+            disciplina=componente_curricular,
+            status_pei="concluido",
+            pei_id=pei_id,
+        )
+
+    aluno_obj.pei_feito = True
+    aluno_obj.pei_valido_ate = datetime.now(timezone.utc) + timedelta(days=VALIDADE_PEI_DIAS)
+    sessao.commit()
+    sessao.refresh(aluno_obj)
+
+    resposta_ia["pei_id"] = pei_id
+    resposta_ia["download_url"] = f"/AI/pei/aluno/{aluno_obj.id_aluno}/{pei_id}/docx"
+    resposta_ia["pei_feito"] = True
+    resposta_ia["pei_valido_ate"] = (
+        aluno_obj.pei_valido_ate.isoformat() if aluno_obj.pei_valido_ate else None
+    )
+    return resposta_ia
+
+
 @AI_router.post("/pei/aluno/{id_aluno}/inicial")
 async def criar_pei_inicial_aluno_ia(
     id_aluno: int,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
     professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    sessao: Session = Depends(pegar_bd),
     payload: Optional[PeiInicialRequest] = None,
 ):
     """Inicia a elaboração do PEI verificando o contexto do aluno e gerando as perguntas e 4 opções de cada subpergunta."""
+    _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=True)
     req = payload or PeiInicialRequest()
+    if req.componente_curricular:
+        try:
+            registrar_status_pei_disciplina(
+                sessao=sessao,
+                id_aluno=id_aluno,
+                id_prof=professor.id_prof,
+                disciplina=req.componente_curricular,
+                status_pei="em_andamento",
+            )
+            sessao.commit()
+        except Exception:
+            sessao.rollback()
     corpo = {"id_prof": professor.id_prof, **req.model_dump(exclude_none=True)}
     return await _encaminhar_requisicao_ia(
         metodo="POST",
@@ -620,48 +773,92 @@ async def criar_pei_aluno_ia(
     payload: PeiCriarRequest,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
     professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    sessao: Session = Depends(pegar_bd),
 ):
-    """Envia as respostas do questionário à API de IA para gerar um PEI completo em formato .docx."""
+    """Envia as respostas do questionário à API de IA para gerar um PEI completo em formato .docx e o perfil_ia."""
+    aluno_obj = _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=True)
     corpo = {
         "id_prof": professor.id_prof,
         **payload.model_dump(exclude_none=True),
         "respostas": [item.model_dump() for item in payload.respostas],
+        "persistido_pelo_gateway": True,
     }
-    return await _encaminhar_requisicao_ia(
+    resposta = await _encaminhar_requisicao_ia(
         metodo="POST",
         endpoint=f"/alunos/{id_aluno}/pei",
         token=credentials.credentials,
         json_data=corpo,
     )
+    try:
+        resposta = _persistir_pei_e_perfil_gateway(
+            sessao=sessao,
+            aluno_obj=aluno_obj,
+            id_prof=professor.id_prof,
+            resposta_ia=resposta,
+            descricao_enviada=payload.descricao_aluno,
+            componente_curricular=payload.componente_curricular,
+        )
+    except Exception as exc:
+        sessao.rollback()
+        print(f"[AI Gateway] Falha ao salvar PEI no armazenamento: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Falha ao salvar o documento do PEI no armazenamento.",
+        ) from exc
+    return resposta
 
 
 @AI_router.get("/pei/aluno/{id_aluno}")
 async def listar_peis_aluno_ia(
     id_aluno: int,
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
-    _professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    sessao: Session = Depends(pegar_bd),
 ):
-    """Lista os PEIs gerados pela IA para o aluno."""
-    return await _encaminhar_requisicao_ia(
-        metodo="GET",
-        endpoint=f"/alunos/{id_aluno}/pei",
-        token=credentials.credentials,
+    """Lista os PEIs salvos no Supabase Storage / banco para o aluno."""
+    aluno_obj = _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=False)
+    regs = (
+        sessao.execute(
+            select(ArquivoAnexo)
+            .where(ArquivoAnexo.id_aluno == id_aluno, ArquivoAnexo.id_conversa == "PEI")
+            .order_by(ArquivoAnexo.criado_em.desc())
+        )
+        .scalars()
+        .all()
     )
+    validade_str = aluno_obj.pei_valido_ate.strftime("%d/%m/%Y") if aluno_obj.pei_valido_ate else "N/A"
+    status_txt = f"Válido até {validade_str}" if pei_esta_valido(aluno_obj) else "Expirado"
+    return [
+        {
+            "pei_id": r.id_arquivo,
+            "data": r.criado_em.isoformat() if r.criado_em else "",
+            "resumo": f"{r.nome_arquivo} ({status_txt})",
+            "arquivo_nome": r.nome_arquivo,
+            "download_url": f"/AI/pei/aluno/{id_aluno}/{r.id_arquivo}/docx",
+        }
+        for r in regs
+    ]
 
 
 @AI_router.get("/pei/aluno/{id_aluno}/{pei_id}")
 async def obter_pei_detalhe_ia(
     id_aluno: int,
     pei_id: str,
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
-    _professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    sessao: Session = Depends(pegar_bd),
 ):
-    """Obtém o documento completo de um PEI gerado."""
-    return await _encaminhar_requisicao_ia(
-        metodo="GET",
-        endpoint=f"/alunos/{id_aluno}/pei/{pei_id}",
-        token=credentials.credentials,
-    )
+    """Obtém o texto extraído sob demanda do .docx do PEI salvo no Supabase Storage."""
+    _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=False)
+    reg = sessao.get(ArquivoAnexo, pei_id)
+    if not reg or reg.id_aluno != id_aluno or reg.id_conversa != "PEI":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PEI não encontrado para este aluno.")
+    docx_bytes = ler_bytes_registro_anexo(reg)
+    texto_pei = extrair_texto_docx_bytes_storage(docx_bytes)
+    return {
+        "pei_id": reg.id_arquivo,
+        "id_aluno": id_aluno,
+        "documento_gerado": texto_pei or reg.nome_arquivo,
+        "data": reg.criado_em.isoformat() if reg.criado_em else "",
+    }
 
 
 @AI_router.post("/pei/aluno/{id_aluno}/importar")
@@ -670,66 +867,114 @@ async def importar_pei_aluno_ia(
     payload: PeiImportarRequest,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
     professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    sessao: Session = Depends(pegar_bd),
 ):
-    """Importa um arquivo de PEI existente (.pdf, .docx, .txt) para o aluno."""
-    corpo = {"id_prof": professor.id_prof, **payload.model_dump(exclude_none=True)}
-    return await _encaminhar_requisicao_ia(
+    """Importa um arquivo de PEI existente (.pdf, .docx, .txt), salva no Supabase Storage e gera o perfil_ia."""
+    aluno_obj = _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=True)
+    corpo = {
+        "id_prof": professor.id_prof,
+        **payload.model_dump(exclude_none=True),
+        "persistido_pelo_gateway": True,
+    }
+    resposta = await _encaminhar_requisicao_ia(
         metodo="POST",
         endpoint=f"/alunos/{id_aluno}/pei/importar",
         token=credentials.credentials,
         json_data=corpo,
     )
+    try:
+        resposta = _persistir_pei_e_perfil_gateway(
+            sessao=sessao,
+            aluno_obj=aluno_obj,
+            id_prof=professor.id_prof,
+            resposta_ia=resposta,
+            componente_curricular=payload.componente_curricular,
+        )
+    except Exception as exc:
+        sessao.rollback()
+        print(f"[AI Gateway] Falha ao salvar PEI importado: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Falha ao salvar o PEI importado no armazenamento.",
+        ) from exc
+    return resposta
 
 
 @AI_router.get("/pei/aluno/{id_aluno}/{pei_id}/docx")
 async def baixar_pei_docx_ia(
     id_aluno: int,
     pei_id: str,
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
-    _professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    sessao: Session = Depends(pegar_bd),
 ) -> Response:
-    """Baixa o arquivo .docx de um PEI gerado pela IA."""
-    url = f"{IA_API_URL}/alunos/{id_aluno}/pei/{pei_id}/docx"
-    headers = _obter_headers(credentials.credentials)
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resposta = await client.get(url, headers=headers)
-        if not resposta.is_success:
-            raise HTTPException(
-                status_code=resposta.status_code,
-                detail=f"Erro ao baixar PEI: {resposta.text}",
-            )
-        return Response(
-            content=resposta.content,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={
-                "Content-Disposition": resposta.headers.get(
-                    "content-disposition",
-                    f'attachment; filename="PEI_aluno_{id_aluno}.docx"',
-                )
-            },
-        )
+    """Baixa o arquivo .docx do PEI diretamente do Supabase Storage validando vínculo com a escola."""
+    _validar_segmento_id_seguro(pei_id, "pei_id")
+    _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=False)
+    reg = sessao.get(ArquivoAnexo, pei_id)
+    if not reg or reg.id_aluno != id_aluno or reg.id_conversa != "PEI":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PEI não encontrado para este aluno.")
+    docx_bytes = ler_bytes_registro_anexo(reg)
+    nome_seguro = (reg.nome_arquivo or f"PEI_aluno_{id_aluno}.docx").replace('"', "").replace("\r", "").replace("\n", "")
+    return Response(
+        content=docx_bytes,
+        media_type=DOCX_PEI_MIME,
+        headers={
+            "Content-Disposition": f'attachment; filename="{nome_seguro}"',
+            "X-Pei-Id": reg.id_arquivo,
+        },
+    )
 
 
 @AI_router.post("/perfil/aluno/{id_aluno}")
 async def gerar_perfil_aluno_ia(
     id_aluno: int,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
-    _professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
     sessao: Session = Depends(pegar_bd),
 ):
-    """Solicita à IA a geração de síntese do perfil pedagógico e sincronização com o banco."""
+    """Solicita à IA a geração de síntese do perfil pedagógico a partir do histórico no PostgreSQL."""
+    aluno_obj = _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=True)
+    _exigir_pei_valido_para_chat(aluno_obj)
+
+    msgs_recentes = (
+        sessao.execute(
+            select(mensagens)
+            .where(
+                mensagens.id_aluno == id_aluno,
+                mensagens.id_prof == professor.id_prof,
+            )
+            .order_by(mensagens.data_mensagem.asc())
+        )
+        .scalars()
+        .all()
+    )
+    linhas_hist = []
+    for m in msgs_recentes[-20:]:
+        papel = "Professor" if (m.role or "user") == "user" else "Assistente"
+        txt = (m.conteudo or "").strip()
+        if papel == "Assistente" and len(txt) > 300:
+            txt = txt[:300] + "..."
+        if txt:
+            linhas_hist.append(f"{papel}: {txt}")
+
     resposta = await _encaminhar_requisicao_ia(
         metodo="POST",
         endpoint=f"/alunos/{id_aluno}/perfil",
         token=credentials.credentials,
+        json_data={"historico_conversas": "\n".join(linhas_hist), "persistido_pelo_gateway": True},
     )
     try:
         perfil_texto = resposta.get("perfil") or resposta.get("perfil_gerado")
-        if perfil_texto:
-            aluno = sessao.get(alunos, id_aluno)
-            if aluno:
-                aluno.perfil_ia = perfil_texto
-                sessao.commit()
+        indicadores = resposta.get("indicadores_desenvolvimento")
+        metas = resposta.get("metas_bimestre")
+        if perfil_texto or indicadores is not None or metas is not None:
+            if perfil_texto:
+                aluno_obj.perfil_ia = perfil_texto
+            if indicadores is not None:
+                aluno_obj.indicadores_desenvolvimento_json = json.dumps(indicadores, ensure_ascii=False)
+            if metas is not None:
+                aluno_obj.metas_bimestre_json = json.dumps(metas, ensure_ascii=False)
+            sessao.commit()
     except Exception as exc:
         print(f"[Aviso] Falha ao atualizar perfil_ia: {exc}")
         sessao.rollback()
@@ -810,8 +1055,9 @@ async def baixar_atividade_adaptada_aluno_ia(
     _professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
 ) -> Response:
     """Baixa o arquivo .docx ou .pdf de uma atividade adaptada gerada pela IA."""
+    ativ_segura = _validar_segmento_id_seguro(atividade_id, "atividade_id")
     fmt = "pdf" if (formato or "").strip().lower() == "pdf" else "docx"
-    url = f"{IA_API_URL}/alunos/{id_aluno}/atividades/{atividade_id}/{fmt}"
+    url = f"{IA_API_URL}/alunos/{id_aluno}/atividades/{ativ_segura}/{fmt}"
     headers = _obter_headers(credentials.credentials)
     media_type = (
         "application/pdf"
@@ -819,11 +1065,18 @@ async def baixar_atividade_adaptada_aluno_ia(
         else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
     async with httpx.AsyncClient(timeout=60.0) as client:
-        resposta = await client.get(url, headers=headers)
+        try:
+            resposta = await client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            print(f"[AI Gateway] Falha ao baixar atividade adaptada: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Serviço de IA temporariamente indisponível para download.",
+            ) from exc
         if not resposta.is_success:
             raise HTTPException(
                 status_code=resposta.status_code,
-                detail=f"Erro ao baixar atividade adaptada: {resposta.text}",
+                detail="Não foi possível baixar a atividade adaptada solicitada.",
             )
         return Response(
             content=resposta.content,
@@ -857,13 +1110,13 @@ async def perguntar_geral_ia(
 
 @AI_router.get("/enviatxtuser/{txt}")
 async def enviatxtuser(txt: str):
-    """Endpoint legado de eco/teste de texto (restrito a dev/homologação)."""
+    """Endpoint legado de eco/teste de texto (restrito a dev/homologação com ENABLE_MOCK_ROUTES=true)."""
     from config.settings import settings
 
-    if settings.ENVIRONMENT == "production":
+    if settings.ENVIRONMENT == "production" or not settings.ENABLE_MOCK_ROUTES:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Rota de teste indisponível em produção.",
+            detail="Rota de teste desabilitada neste ambiente.",
         )
     return {"mensagem": txt}
 
@@ -885,13 +1138,13 @@ async def txtIA(
 
 @AI_router.post("/simular")
 async def simular_ia_sem_login(payload: SimularIA):
-    """Endpoint de homologação/teste para simular neurodivergências e perguntas (desativado em produção)."""
+    """Endpoint de homologação/teste para simular neurodivergências e perguntas (requer ENABLE_MOCK_ROUTES=true)."""
     from config.settings import settings
 
-    if settings.ENVIRONMENT == "production":
+    if settings.ENVIRONMENT == "production" or not settings.ENABLE_MOCK_ROUTES:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Rota de simulação indisponível em ambiente de produção.",
+            detail="Rota de simulação desabilitada neste ambiente.",
         )
     return await _encaminhar_requisicao_ia(
         metodo="POST",

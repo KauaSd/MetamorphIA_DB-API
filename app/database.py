@@ -59,6 +59,7 @@ class Usuario(base):
     microsoft_id = Column(String(150), unique=True, index=True, nullable=True)
     cpf_cnpj = Column(String(20), nullable=True)
     tipo_usuario = Column(String(50), nullable=False, default="normal")
+    modo_ativo = Column(String(30), nullable=False, default="adm")
     tags_usuario = Column(Text, nullable=True)
     instrucoes_ia = Column(Text, nullable=True)
     token_version = Column(Integer, nullable=False, default=1)
@@ -177,6 +178,21 @@ class Turma(base):
     id_prof = synonym("fk_Usuario_id_usuario")
 
 
+VALIDADE_PEI_DIAS = 60
+
+
+def pei_esta_valido(aluno: "Aluno | None") -> bool:
+    """Verifica se o aluno possui PEI concluído e dentro da validade bimestral (60 dias)."""
+    if not aluno or not bool(getattr(aluno, "pei_feito", False)):
+        return False
+    valido_ate = getattr(aluno, "pei_valido_ate", None)
+    if valido_ate is None:
+        return False
+    if valido_ate.tzinfo is None:
+        valido_ate = valido_ate.replace(tzinfo=timezone.utc)
+    return valido_ate > datetime.now(timezone.utc)
+
+
 class Aluno(base):
     __tablename__ = "aluno"
     id_aluno = Column(Integer, primary_key=True, autoincrement=True)
@@ -185,12 +201,20 @@ class Aluno(base):
     desc_aluno = Column(Text, nullable=True)
     neuro_aluno = Column(String(150), nullable=False)
     perfil_ia = Column(Text, nullable=True)
+    indicadores_desenvolvimento_json = Column(Text, nullable=True)
+    metas_bimestre_json = Column(Text, nullable=True)
+    pei_feito = Column(Boolean, nullable=False, default=False)
+    pei_valido_ate = Column(DateTime(timezone=True), nullable=True)
     fk_Turma_id_turma = Column(Integer, ForeignKey("turma.id_turma"), nullable=False)
     fk_Usuario_id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=True)
 
     neurodiv_aluno = synonym("neuro_aluno")
     id_turma = synonym("fk_Turma_id_turma")
     id_prof = synonym("fk_Usuario_id_usuario")
+
+    @property
+    def pei_ativo(self) -> bool:
+        return pei_esta_valido(self)
 
     mensagens_rel = relationship(
         "Mensagem", secondary=mensagem_al, back_populates="alunos_rel"
@@ -278,6 +302,17 @@ class ArquivoAnexo(base):
     tamanho_bytes = Column(Integer, nullable=False, default=0)
     caminho_arquivo = Column(String(500), nullable=False)
     criado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class PeiDisciplina(base):
+    __tablename__ = "pei_disciplina"
+    id_pei_disciplina = Column(Integer, primary_key=True, autoincrement=True)
+    id_aluno = Column(Integer, ForeignKey("aluno.id_aluno"), nullable=False, index=True)
+    id_prof = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=False, index=True)
+    disciplina = Column(String(120), nullable=False)
+    status = Column(String(30), nullable=False, default="nao_iniciado")
+    pei_id = Column(String(64), nullable=True)
+    atualizado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class RefreshToken(base):
@@ -380,37 +415,51 @@ def _corrigir_fks_legadas_postgres(eng) -> None:
 
 
 def _garantir_colunas_novas(eng) -> None:
-    """Adiciona colunas novas na tabela usuario caso o banco já existisse antes da atualização."""
+    """Adiciona colunas novas em usuario e aluno caso o banco já existisse antes da atualização."""
     from sqlalchemy import inspect, text
 
     try:
         insp = inspect(eng)
-        if not insp.has_table("usuario"):
-            return
-        colunas_existentes = {c["name"] for c in insp.get_columns("usuario")}
         comandos: list[str] = []
-        if "microsoft_id" not in colunas_existentes:
-            comandos.append("ALTER TABLE usuario ADD COLUMN microsoft_id VARCHAR(150)")
-        if "instrucoes_ia" not in colunas_existentes:
-            comandos.append("ALTER TABLE usuario ADD COLUMN instrucoes_ia TEXT")
-        if "token_version" not in colunas_existentes:
-            comandos.append("ALTER TABLE usuario ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1")
+        if insp.has_table("usuario"):
+            colunas_usuario = {c["name"] for c in insp.get_columns("usuario")}
+            if "microsoft_id" not in colunas_usuario:
+                comandos.append("ALTER TABLE usuario ADD COLUMN microsoft_id VARCHAR(150)")
+            if "instrucoes_ia" not in colunas_usuario:
+                comandos.append("ALTER TABLE usuario ADD COLUMN instrucoes_ia TEXT")
+            if "token_version" not in colunas_usuario:
+                comandos.append("ALTER TABLE usuario ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1")
+            if "modo_ativo" not in colunas_usuario:
+                comandos.append("ALTER TABLE usuario ADD COLUMN modo_ativo VARCHAR(30) NOT NULL DEFAULT 'adm'")
+        if insp.has_table("aluno"):
+            colunas_aluno = {c["name"] for c in insp.get_columns("aluno")}
+            tipo_ts = "TIMESTAMPTZ" if eng.dialect.name == "postgresql" else "TIMESTAMP"
+            if "pei_feito" not in colunas_aluno:
+                comandos.append("ALTER TABLE aluno ADD COLUMN pei_feito BOOLEAN NOT NULL DEFAULT FALSE")
+            if "pei_valido_ate" not in colunas_aluno:
+                comandos.append(f"ALTER TABLE aluno ADD COLUMN pei_valido_ate {tipo_ts}")
+            if "indicadores_desenvolvimento_json" not in colunas_aluno:
+                comandos.append("ALTER TABLE aluno ADD COLUMN indicadores_desenvolvimento_json TEXT")
+            if "metas_bimestre_json" not in colunas_aluno:
+                comandos.append("ALTER TABLE aluno ADD COLUMN metas_bimestre_json TEXT")
         if comandos:
             with eng.begin() as conn:
                 for sql in comandos:
                     conn.execute(text(sql))
     except Exception as exc:
-        print(f"[Aviso] Não foi possível migrar colunas novas em usuario: {exc}")
+        print(f"[Aviso] Não foi possível migrar colunas novas: {exc}")
 
 
 def _inicializar_banco_com_fallback() -> None:
-    """Garante que o banco esteja acessível e com as tabelas criadas (fallback local SQLite se o banco remoto falhar)."""
+    """Garante que o banco esteja acessível e com as tabelas criadas (fallback local apenas fora de produção)."""
     global engine
     try:
         base.metadata.create_all(bind=engine)
         _garantir_colunas_novas(engine)
         _corrigir_fks_legadas_postgres(engine)
     except Exception as exc:
+        if settings.ENVIRONMENT == "production":
+            raise RuntimeError(f"Falha ao conectar/inicializar o banco de produção: {exc}") from exc
         if not settings.BD_ACCESS.startswith("sqlite"):
             print(f"[Aviso] Banco remoto indisponível ({exc}). Usando SQLite local para testes.")
             sqlite_path = Path(__file__).resolve().parent / "metamorphia_local.db"

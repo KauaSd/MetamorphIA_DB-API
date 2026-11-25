@@ -10,9 +10,12 @@ load_dotenv()
 
 class Settings:
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development").strip().lower()
+    ENABLE_MOCK_ROUTES: bool = os.getenv("ENABLE_MOCK_ROUTES", "false").strip().lower() == "true"
     SECRET_KEY: str = os.environ["SECRET_KEY"].strip()
     # algoritimo do hash - declara o tipo de algoritomo que sera feito o hash
     ALGORITHM: str = "HS256"
+    JWT_ISSUER: str = "metamorphia-db-api"
+    JWT_AUDIENCE: str = "metamorphia-services"
     # tempo do token - tempo maximo que o token pode existir
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "14"))
@@ -28,7 +31,7 @@ class Settings:
 
     # Segurança: CORS e Rate Limiting
     CORS_ORIGINS: list[str] = [
-        o.strip()
+        o.strip().rstrip("/")
         for o in os.getenv(
             "CORS_ORIGINS",
             "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173",

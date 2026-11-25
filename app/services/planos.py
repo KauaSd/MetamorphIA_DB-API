@@ -142,8 +142,14 @@ def obter_contexto_escola(
         elif eh_dono_grupo:
             papel = "adm"
 
+    modo_usuario = getattr(usuario, "modo_ativo", "adm") or "adm"
+    if usuario.tipo_usuario in ("adm_escola", "adm_pro_plus") and modo_usuario == "professor":
+        papel = "professor"
+
     if usuario.tipo_usuario == "adm_institucional":
         pode_chat = False
+    elif usuario.tipo_usuario in ("adm_escola", "adm_pro_plus") and modo_usuario == "professor":
+        pode_chat = True
     elif vinc_esc is not None:
         pode_chat = bool(vinc_esc.pode_chat)
     else:
@@ -457,6 +463,18 @@ def ativar_contrato_e_permissoes(
             escola_inst = sessao.get(Escola, id_escola_cfg)
             if not escola_inst:
                 raise HTTPException(status_code=404, detail="Escola não encontrada para o plano Institucional.")
+            vinc_existente = sessao.execute(
+                select(User_esc).where(
+                    User_esc.fk_Usuario_id_usuario == usuario.id_usuario,
+                    User_esc.fk_Escola_id_escola == escola_inst.id_escola,
+                    User_esc.papel == "adm",
+                )
+            ).scalars().first()
+            if escola_inst.fk_Grupo_id_grupo != grupo_principal.id_grupo and not vinc_existente:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Você não possui permissão de administrador sobre a escola informada.",
+                )
             escola_inst.fk_Contrato_id_cont = contrato.id_cont
             escola_inst.email_institucional = email_inst
         else:
@@ -588,6 +606,111 @@ def contratar_ou_trocar_plano(
     }
 
 
+def exportar_peis_zip_escola(
+    sessao: Session,
+    adm_logado: Usuario,
+    id_escola: int,
+    id_turma: Optional[int] = None,
+    id_aluno: Optional[int] = None,
+) -> tuple[bytes, str]:
+    """Gera um pacote .zip com os PEIs (.docx) da escola, de uma turma específica ou de um aluno."""
+    import io
+    import zipfile
+    from database import ArquivoAnexo
+    from services.storage import ler_bytes_registro_anexo
+
+    ctx = obter_contexto_escola(sessao, adm_logado.id_usuario, id_escola)
+    if ctx["papel"] not in ("adm", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador da escola (no modo ADM) pode baixar PEIs em lote.",
+        )
+
+    stmt_turmas = select(Turma).where(Turma.fk_Escola_id_escola == id_escola)
+    if id_turma is not None:
+        stmt_turmas = stmt_turmas.where(Turma.id_turma == id_turma)
+    turmas_esc = sessao.execute(stmt_turmas).scalars().all()
+    if id_turma is not None and not turmas_esc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Turma não encontrada nesta escola.",
+        )
+
+    mapa_turmas = {t.id_turma: t.nome_turma for t in turmas_esc}
+    turma_ids = list(mapa_turmas.keys())
+    if not turma_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Nenhuma turma encontrada para exportar PEIs.",
+        )
+
+    stmt_alunos = select(Aluno).where(Aluno.fk_Turma_id_turma.in_(turma_ids))
+    if id_aluno is not None:
+        stmt_alunos = stmt_alunos.where(Aluno.id_aluno == id_aluno)
+    alunos_esc = sessao.execute(stmt_alunos).scalars().all()
+    if id_aluno is not None and not alunos_esc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Aluno não encontrado nesta escola.",
+        )
+
+    mapa_alunos = {a.id_aluno: a for a in alunos_esc}
+    aluno_ids = list(mapa_alunos.keys())
+    if not aluno_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Nenhum aluno encontrado para exportar PEIs.",
+        )
+
+    regs_pei = (
+        sessao.execute(
+            select(ArquivoAnexo)
+            .where(
+                ArquivoAnexo.id_aluno.in_(aluno_ids),
+                ArquivoAnexo.id_conversa == "PEI",
+            )
+            .order_by(ArquivoAnexo.criado_em.desc())
+        )
+        .scalars()
+        .all()
+    )
+    if not regs_pei:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Nenhum arquivo de PEI encontrado para os critérios selecionados.",
+        )
+
+    buf = io.BytesIO()
+    adicionados = 0
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for idx, reg in enumerate(regs_pei, start=1):
+            try:
+                conteudo = ler_bytes_registro_anexo(reg)
+            except HTTPException:
+                continue
+            al = mapa_alunos.get(reg.id_aluno)
+            nome_turma = (mapa_turmas.get(al.fk_Turma_id_turma) if al else "Turma") or "Turma"
+            nome_turma_seg = re.sub(r"[^A-Za-z0-9_-]", "_", nome_turma)
+            nome_arq_seg = re.sub(r"[^A-Za-z0-9._-]", "_", reg.nome_arquivo or f"PEI_{reg.id_arquivo[:8]}.docx")
+            caminho_zip = f"{nome_turma_seg}/{idx:02d}_{nome_arq_seg}"
+            zf.writestr(caminho_zip, conteudo)
+            adicionados += 1
+
+    if adicionados == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Os arquivos de PEI não foram encontrados no armazenamento.",
+        )
+
+    if id_aluno is not None:
+        nome_zip = f"PEIs_escola_{id_escola}_aluno_{id_aluno}.zip"
+    elif id_turma is not None:
+        nome_zip = f"PEIs_escola_{id_escola}_turma_{id_turma}.zip"
+    else:
+        nome_zip = f"PEIs_escola_{id_escola}.zip"
+    return buf.getvalue(), nome_zip
+
+
 def adicionar_professor_escola(
     sessao: Session,
     adm_logado: Usuario,
@@ -601,10 +724,13 @@ def adicionar_professor_escola(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Apenas o administrador da escola pode adicionar professores.",
         )
-    if ctx["plano"] not in ("institucional", "institucional_plus"):
+    if ctx["plano"] != "institucional":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Apenas escolas dos planos Institucional ou Institucional+ permitem múltiplos professores.",
+            detail=(
+                "A adição direta por e-mail na escola é exclusiva do plano Institucional (escola única). "
+                "No plano Institucional+ (rede), adicione professores pelo grupo."
+            ),
         )
 
     professores_atuais = sessao.execute(

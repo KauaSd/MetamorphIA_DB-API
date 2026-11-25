@@ -7,6 +7,7 @@ from database import OperationalError, Session, Tipo2FA, pegar_bd, professores
 from dependencies import pegar_professor_logado, pegar_usuario_pendente_2fa
 from fastapi import APIRouter, Cookie, Depends, Request, Response
 from schemas.schemas import (
+    AlternarModoRequest,
     AlterarSenhaRequest,
     GoogleAuthRequest,
     InstrucoesIARequest,
@@ -21,13 +22,10 @@ from schemas.schemas import (
     Validar2FARequest,
     VerificarCodigoSenhaRequest,
 )
+from security import limiter
 import services.mfa as fnmfa
 import services.password_reset as pwd_reset
 import services.users as users
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-
-limiter = Limiter(key_func=get_remote_address)
 
 Auth_router = APIRouter(prefix="/autenticar", tags=["autenticar"])
 
@@ -38,6 +36,18 @@ def obter_meu_perfil(
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
     return users.obter_perfil_completo_usuario(sessao, professor_logado)
+
+
+@Auth_router.post("/alternar-modo")
+def alternar_modo_adm_professor(
+    dados: Optional[AlternarModoRequest] = None,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    """Alterna o ADM de escola institucional entre 'adm' e 'professor'."""
+    return users.alternar_modo_usuario(
+        sessao, professor_logado, dados.modo if dados else None
+    )
 
 
 @Auth_router.post("/cadastro")

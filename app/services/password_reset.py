@@ -49,10 +49,11 @@ def _enviar_codigo_por_email_ou_telefone(
                 server.login(settings.MAIL_USERNAME, settings.MAIL_PASSWORD)
                 server.send_message(msg)
         except Exception as exc:
+            print(f"[PasswordReset] Falha SMTP: {exc}")
             if settings.ENVIRONMENT == "production":
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Falha ao enviar o e-mail de recuperação: {exc}",
+                    detail="Falha temporária ao enviar o e-mail de recuperação.",
                 ) from exc
     else:
         if not usuario.telefone_usuario:
@@ -176,11 +177,7 @@ def redefinir_senha_com_token(
 ) -> dict[str, Any]:
     """Atualiza a senha do usuário usando o token temporário de redefinição e invalida sessões antigas."""
     try:
-        payload = jwt.decode(
-            dados.reset_token,
-            settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM],
-        )
+        payload = security.decodificar_jwt_padrao(dados.reset_token)
     except InvalidTokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
