@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import json
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 import uuid
 
 from database import (
@@ -20,7 +20,7 @@ from database import (
     select,
 )
 from dependencies import pegar_professor_logado
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from schemas.schemas import Aluno, Alunoschema, EditaAlunoSchema, PesquisaAluno
 from services.disciplinas import listar_status_pei_disciplinas, registrar_status_pei_disciplina
@@ -453,6 +453,45 @@ def ListarConversasAlunoDB(
     }
 
 
+def _serializar_mensagens_conversa(
+    sessao: Session,
+    conversa_id: str,
+    id_aluno: int,
+    id_prof: int,
+) -> list[dict[str, Any]]:
+    """Busca e serializa as mensagens de uma conversa em ordem cronológica."""
+    msgs = (
+        sessao.execute(
+            select(mensagens)
+            .where(
+                mensagens.id_conversa == conversa_id,
+                mensagens.id_aluno == id_aluno,
+                mensagens.id_prof == id_prof,
+            )
+            .order_by(mensagens.data_mensagem.asc())
+        )
+        .scalars()
+        .all()
+    )
+    saida: list[dict[str, Any]] = []
+    for m in msgs:
+        anexos_parsed = None
+        if m.anexo_mensagem:
+            try:
+                anexos_parsed = json.loads(m.anexo_mensagem)
+            except Exception:
+                anexos_parsed = None
+        saida.append(
+            {
+                "role": m.role or "user",
+                "conteudo": m.conteudo or "",
+                "data": m.data_mensagem.isoformat() if m.data_mensagem else "",
+                "anexos": anexos_parsed,
+            }
+        )
+    return saida
+
+
 @Student_router.get("/{id_aluno}/conversas-db/{conversa_id}")
 def ObterMensagensConversaAlunoDB(
     id_aluno: int,
@@ -469,35 +508,7 @@ def ObterMensagensConversaAlunoDB(
     if conv and conv.id_prof != professor_logado.id_prof:
         raise HTTPException(status_code=403, detail="Esta conversa pertence a outro professor.")
 
-    msgs = (
-        sessao.execute(
-            select(mensagens)
-            .where(
-                mensagens.id_conversa == conversa_id,
-                mensagens.id_aluno == id_aluno,
-                mensagens.id_prof == professor_logado.id_prof,
-            )
-            .order_by(mensagens.data_mensagem.asc())
-        )
-        .scalars()
-        .all()
-    )
-    saida = []
-    for m in msgs:
-        anexos_parsed = None
-        if m.anexo_mensagem:
-            try:
-                anexos_parsed = json.loads(m.anexo_mensagem)
-            except Exception:
-                anexos_parsed = None
-        saida.append(
-            {
-                "role": m.role or "user",
-                "conteudo": m.conteudo or "",
-                "data": m.data_mensagem.isoformat() if m.data_mensagem else "",
-                "anexos": anexos_parsed,
-            }
-        )
+    saida = _serializar_mensagens_conversa(sessao, conversa_id, id_aluno, professor_logado.id_prof)
     return {"conversa_id": conversa_id, "mensagens": saida}
 
 
@@ -619,26 +630,34 @@ def DeletarConversaAlunoDB(
     return {"mensagem": "Conversa removida com sucesso.", "conversa_id": conversa_id, "documentos_removidos": len(msg_ids)}
 
 
-def listar_conversas_em_lote_para_usuario(
+_MESES_PT_BUSCA = (
+    "",
+    "jan janeiro",
+    "fev fevereiro",
+    "mar março marco",
+    "abr abril",
+    "mai maio",
+    "jun junho",
+    "jul julho",
+    "ago agosto",
+    "set setembro",
+    "out outubro",
+    "nov novembro",
+    "dez dezembro",
+)
+
+
+def _obter_alunos_permitidos_chat(
     sessao: Session,
     professor_logado: professores,
-    aluno_ids_raw: Optional[str] = None,
-) -> dict[str, list[dict[str, str]]]:
-    """Busca conversas de múltiplos alunos em lote com uma única query e validação de acesso."""
+    ids_solicitados: Optional[list[int]] = None,
+) -> list[alunos]:
+    """Retorna os alunos acessíveis para chat/conversas pelo usuário autenticado."""
     if getattr(professor_logado, "tipo_usuario", "normal") == "adm_institucional":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="O administrador institucional não possui permissão pedagógica de chat/conversas.",
         )
-
-    ids_solicitados: list[int] = []
-    if aluno_ids_raw:
-        for parte in aluno_ids_raw.split(","):
-            p = parte.strip()
-            if p:
-                if not p.isdigit():
-                    raise HTTPException(status_code=400, detail=f"ID de aluno inválido: {p}")
-                ids_solicitados.append(int(p))
 
     stmt_alunos = select(alunos)
     if ids_solicitados:
@@ -655,7 +674,25 @@ def listar_conversas_em_lote_para_usuario(
             | (alunos.fk_Turma_id_turma.in_(turmas_chat))
         )
 
-    alunos_permitidos = sessao.execute(stmt_alunos).scalars().all()
+    return sessao.execute(stmt_alunos).scalars().all()
+
+
+def listar_conversas_em_lote_para_usuario(
+    sessao: Session,
+    professor_logado: professores,
+    aluno_ids_raw: Optional[str] = None,
+) -> dict[str, list[dict[str, str]]]:
+    """Busca conversas de múltiplos alunos em lote com uma única query e validação de acesso."""
+    ids_solicitados: list[int] = []
+    if aluno_ids_raw:
+        for parte in aluno_ids_raw.split(","):
+            p = parte.strip()
+            if p:
+                if not p.isdigit():
+                    raise HTTPException(status_code=400, detail=f"ID de aluno inválido: {p}")
+                ids_solicitados.append(int(p))
+
+    alunos_permitidos = _obter_alunos_permitidos_chat(sessao, professor_logado, ids_solicitados or None)
     ids_permitidos = [a.id_aluno for a in alunos_permitidos]
 
     if ids_solicitados and len(ids_permitidos) < len(set(ids_solicitados)):
@@ -699,6 +736,98 @@ def listar_conversas_em_lote_para_usuario(
     return agrupado
 
 
+def listar_conversas_recentes_para_usuario(
+    sessao: Session,
+    professor_logado: professores,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    busca: Optional[str] = None,
+    ordenar_por: Literal["data", "aluno", "titulo"] = "data",
+    ordem: Literal["desc", "asc"] = "desc",
+) -> list[dict[str, Any]]:
+    """Lista conversas recentes do professor em ordem global, enriquecidas com aluno e turma."""
+    alunos_permitidos = _obter_alunos_permitidos_chat(sessao, professor_logado)
+    if not alunos_permitidos:
+        return []
+
+    mapa_alunos = {a.id_aluno: a for a in alunos_permitidos}
+    turma_ids = {a.fk_Turma_id_turma for a in alunos_permitidos if a.fk_Turma_id_turma}
+    mapa_turmas: dict[int, str] = {}
+    if turma_ids:
+        turmas = sessao.execute(select(Turma).where(Turma.id_turma.in_(turma_ids))).scalars().all()
+        mapa_turmas = {t.id_turma: t.nome_turma for t in turmas}
+
+    convs = (
+        sessao.execute(
+            select(conversas)
+            .where(
+                conversas.id_aluno.in_(list(mapa_alunos.keys())),
+                conversas.id_prof == professor_logado.id_prof,
+            )
+            .order_by(conversas.atualizado_em.desc())
+        )
+        .scalars()
+        .all()
+    )
+
+    termo = (busca or "").strip().lower().replace(".", "")
+    itens: list[dict[str, Any]] = []
+    for c in convs:
+        aluno = mapa_alunos.get(c.id_aluno)
+        if not aluno:
+            continue
+        nome_turma = mapa_turmas.get(aluno.fk_Turma_id_turma) if aluno.fk_Turma_id_turma else None
+        dt = c.atualizado_em
+        data_iso = dt.isoformat() if dt else ""
+
+        if termo:
+            mes_txt = _MESES_PT_BUSCA[dt.month] if dt and 1 <= dt.month <= 12 else ""
+            ano_txt = str(dt.year) if dt else ""
+            campos_busca = " ".join(
+                filter(
+                    None,
+                    [
+                        c.titulo or "",
+                        aluno.nome_aluno or "",
+                        aluno.neuro_aluno or "",
+                        nome_turma or "",
+                        data_iso,
+                        mes_txt,
+                        ano_txt,
+                    ],
+                )
+            ).lower()
+            if not all(parte in campos_busca for parte in termo.split()):
+                continue
+
+        itens.append(
+            {
+                "conversa_id": c.id_conversa,
+                "titulo": c.titulo or "",
+                "data": data_iso,
+                "id_aluno": aluno.id_aluno,
+                "nome_aluno": aluno.nome_aluno or "",
+                "neuro_aluno": aluno.neuro_aluno or "",
+                "id_turma": aluno.fk_Turma_id_turma,
+                "nome_turma": nome_turma,
+            }
+        )
+
+    reverso = ordem == "desc"
+    if ordenar_por == "aluno":
+        itens.sort(key=lambda x: (x["nome_aluno"].lower(), x["data"]), reverse=reverso)
+    elif ordenar_por == "titulo":
+        itens.sort(key=lambda x: (x["titulo"].lower(), x["data"]), reverse=reverso)
+    else:
+        itens.sort(key=lambda x: x["data"], reverse=reverso)
+
+    if offset > 0:
+        itens = itens[offset:]
+    if limit is not None:
+        itens = itens[:limit]
+    return itens
+
+
 @Student_router.get("/conversas-lote")
 def ListarConversasEmLoteDB(
     aluno_ids: Optional[str] = None,
@@ -706,6 +835,87 @@ def ListarConversasEmLoteDB(
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
     return listar_conversas_em_lote_para_usuario(sessao, professor_logado, aluno_ids)
+
+
+@Student_router.get("/conversas-recentes")
+def ListarConversasRecentesDB(
+    limit: Optional[int] = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    busca: Optional[str] = Query(default=None, max_length=120),
+    ordenar_por: Literal["data", "aluno", "titulo"] = "data",
+    ordem: Literal["desc", "asc"] = "desc",
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    return listar_conversas_recentes_para_usuario(
+        sessao=sessao,
+        professor_logado=professor_logado,
+        limit=limit,
+        offset=offset,
+        busca=busca,
+        ordenar_por=ordenar_por,
+        ordem=ordem,
+    )
+
+
+def obter_conversa_por_id_para_usuario(
+    sessao: Session,
+    professor_logado: professores,
+    conversa_id: str,
+) -> dict[str, Any]:
+    """Retorna os metadados da conversa e suas mensagens diretamente pelo conversa_id."""
+    if getattr(professor_logado, "tipo_usuario", "normal") == "adm_institucional":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="O administrador institucional não possui permissão pedagógica de chat/conversas.",
+        )
+
+    conv = sessao.get(conversas, conversa_id)
+    if not conv or conv.id_prof != professor_logado.id_prof:
+        raise HTTPException(status_code=404, detail="Conversa não encontrada.")
+
+    aluno = sessao.get(alunos, conv.id_aluno)
+    if not aluno:
+        raise HTTPException(status_code=404, detail="Aluno da conversa não encontrado.")
+    _validar_acesso_escola_aluno(sessao, professor_logado, aluno, exigir_pode_chat=True)
+
+    nome_turma = None
+    if aluno.fk_Turma_id_turma:
+        turma = sessao.get(Turma, aluno.fk_Turma_id_turma)
+        if turma:
+            nome_turma = turma.nome_turma
+
+    mensagens_conv = _serializar_mensagens_conversa(
+        sessao=sessao,
+        conversa_id=conversa_id,
+        id_aluno=aluno.id_aluno,
+        id_prof=professor_logado.id_prof,
+    )
+    return {
+        "conversa_id": conv.id_conversa,
+        "titulo": conv.titulo or "",
+        "data": conv.atualizado_em.isoformat() if conv.atualizado_em else "",
+        "id_aluno": aluno.id_aluno,
+        "nome_aluno": aluno.nome_aluno or "",
+        "neuro_aluno": aluno.neuro_aluno or "",
+        "id_turma": aluno.fk_Turma_id_turma,
+        "nome_turma": nome_turma,
+        "pei_ativo": bool(aluno.pei_ativo),
+        "mensagens": mensagens_conv,
+    }
+
+
+@Student_router.get("/conversas/{conversa_id}")
+def ObterConversaPorIdDB(
+    conversa_id: str,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    return obter_conversa_por_id_para_usuario(
+        sessao=sessao,
+        professor_logado=professor_logado,
+        conversa_id=conversa_id,
+    )
 
 
 @Student_router.get("/{id_aluno}")

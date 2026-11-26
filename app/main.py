@@ -43,7 +43,7 @@ async def adicionar_headers_seguranca(request: Request, call_next) -> Response:
     return response
 
 from routers.admin import Admin_router
-from routers.ai import AI_router
+from routers.ai import AI_router, Conversas_router
 from routers.auth import Auth_router
 from routers.pagamentos import Pagamentos_router
 from routers.planos import Planos_router
@@ -52,6 +52,7 @@ from routers.turmas import Turma_router
 
 app.include_router(Admin_router)
 app.include_router(AI_router)
+app.include_router(Conversas_router)
 app.include_router(Auth_router)
 app.include_router(Pagamentos_router)
 app.include_router(Planos_router)

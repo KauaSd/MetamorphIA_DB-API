@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 import re
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 from urllib.parse import quote
 import uuid
 
@@ -21,7 +21,7 @@ from database import (
     select,
 )
 from dependencies import pegar_professor_logado, security_scheme
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.security import HTTPAuthorizationCredentials
 import httpx
 from config.settings import settings
@@ -37,6 +37,7 @@ from services.storage import (
 )
 
 AI_router = APIRouter(prefix="/AI", tags=["AI"])
+Conversas_router = APIRouter(tags=["Conversas"])
 
 # URL base da API de Inteligência Artificial (Ia_metamorphia)
 IA_API_URL = os.getenv("IA_API_URL", os.getenv("URL", "http://localhost:8001")).rstrip("/")
@@ -534,6 +535,48 @@ def listar_conversas_lote_ia(
     from routers.students import listar_conversas_em_lote_para_usuario
 
     return listar_conversas_em_lote_para_usuario(sessao, professor, aluno_ids)
+
+
+@AI_router.get("/conversas/recentes")
+@Conversas_router.get("/conversas/recentes")
+def listar_conversas_recentes_ia(
+    professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    limit: Optional[int] = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    busca: Optional[str] = Query(default=None, max_length=120),
+    ordenar_por: Literal["data", "aluno", "titulo"] = "data",
+    ordem: Literal["desc", "asc"] = "desc",
+    sessao: Session = Depends(pegar_bd),
+):
+    """Lista conversas recentes do professor em ordem global, enriquecidas com aluno e turma."""
+    from routers.students import listar_conversas_recentes_para_usuario
+
+    return listar_conversas_recentes_para_usuario(
+        sessao=sessao,
+        professor_logado=professor,
+        limit=limit,
+        offset=offset,
+        busca=busca,
+        ordenar_por=ordenar_por,
+        ordem=ordem,
+    )
+
+
+@AI_router.get("/conversas/{conversa_id}")
+@Conversas_router.get("/conversas/{conversa_id}")
+def obter_conversa_por_id_ia(
+    conversa_id: str,
+    professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    sessao: Session = Depends(pegar_bd),
+):
+    """Retorna os metadados da conversa e suas mensagens pelo conversa_id."""
+    from routers.students import obter_conversa_por_id_para_usuario
+
+    return obter_conversa_por_id_para_usuario(
+        sessao=sessao,
+        professor_logado=professor,
+        conversa_id=conversa_id,
+    )
 
 
 @AI_router.get("/chat/aluno/{id_aluno}/conversas")
