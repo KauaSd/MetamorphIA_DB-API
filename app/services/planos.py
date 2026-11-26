@@ -170,16 +170,20 @@ def obter_contexto_escola(
     )
     tags_lista = [t.strip() for t in tags_str.split(",") if t.strip()]
 
-    max_turmas = (
-        contrato.max_qtd_turmas
-        if contrato and contrato.max_qtd_turmas is not None
-        else (plano_obj.max_turmas_por_escola if plano_obj else 2)
-    )
-    max_alunos = (
-        contrato.max_qtd_alunos
-        if contrato and contrato.max_qtd_alunos is not None
-        else (plano_obj.max_alunos_por_turma if plano_obj else 2)
-    )
+    if nome_plano == "pro":
+        max_turmas = plano_obj.max_turmas_por_escola if plano_obj else None
+        max_alunos = plano_obj.max_alunos_por_turma if plano_obj else 30
+    else:
+        max_turmas = (
+            contrato.max_qtd_turmas
+            if contrato and contrato.max_qtd_turmas is not None
+            else (plano_obj.max_turmas_por_escola if plano_obj else 2)
+        )
+        max_alunos = (
+            contrato.max_qtd_alunos
+            if contrato and contrato.max_qtd_alunos is not None
+            else (plano_obj.max_alunos_por_turma if plano_obj else 5)
+        )
     max_usuarios = contrato.max_qtd_user if contrato else 1
 
     institucional_flag = nome_plano in ("institucional", "institucional_plus")
@@ -1743,3 +1747,81 @@ def deletar_escola_usuario(
     sessao.commit()
     invalidar_cache_permissoes()
     return {"mensagem": "Escola removida com sucesso.", "id_escola": id_escola}
+
+
+LIMITES_USO_IA_POR_PLANO: dict[str, dict[str, Optional[int]]] = {
+    "normal": {"adaptacao_mes": 10, "pei": None},
+    "pro": {"adaptacao_mes": 120, "pei": 120},
+    "institucional": {"adaptacao_mes": None, "pei": None},
+    "institucional_plus": {"adaptacao_mes": None, "pei": None},
+}
+
+
+def validar_e_registrar_cota_ia(
+    sessao: Session,
+    usuario: Usuario,
+    tipo: str,
+) -> None:
+    """Valida limites de adaptações com IA/mês e PEIs do plano do usuário e registra o uso."""
+    from datetime import datetime, timezone
+    from sqlalchemy import func
+    from database import UsoIA
+    from services.users import obter_claims_jwt_usuario
+
+    claims = obter_claims_jwt_usuario(sessao, usuario)
+    plano = claims.get("plano") or "normal"
+    cfg = LIMITES_USO_IA_POR_PLANO.get(plano, LIMITES_USO_IA_POR_PLANO["normal"])
+
+    if tipo == "adaptacao":
+        limite = cfg["adaptacao_mes"]
+        if limite is not None:
+            inicio_mes = datetime.now(timezone.utc).replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0
+            )
+            qtd = sessao.execute(
+                select(func.count(UsoIA.id)).where(
+                    UsoIA.id_prof == usuario.id_usuario,
+                    UsoIA.tipo == "adaptacao",
+                    UsoIA.criado_em >= inicio_mes,
+                )
+            ).scalar_one()
+            if qtd >= limite:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "mensagem": f"Limite mensal de {limite} adaptações com IA atingido no plano '{plano}'.",
+                        "codigo_erro": "LIMITE_ADAPTACOES_ATINGIDO",
+                        "tipo_limite": "adaptacao",
+                        "upgrade_sugerido": True,
+                        "opcoes_upgrade": (
+                            ["pro", "institucional", "institucional_plus"]
+                            if plano == "normal"
+                            else ["institucional", "institucional_plus"]
+                        ),
+                    },
+                )
+    elif tipo == "pei":
+        limite = cfg["pei"]
+        if limite is not None:
+            qtd = sessao.execute(
+                select(func.count(UsoIA.id)).where(
+                    UsoIA.id_prof == usuario.id_usuario,
+                    UsoIA.tipo == "pei",
+                )
+            ).scalar_one()
+            if qtd >= limite:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "mensagem": f"Limite de {limite} PEIs atingido no plano '{plano}'.",
+                        "codigo_erro": "LIMITE_PEIS_ATINGIDO",
+                        "tipo_limite": "pei",
+                        "upgrade_sugerido": True,
+                        "opcoes_upgrade": ["institucional", "institucional_plus"],
+                    },
+                )
+    else:
+        return
+
+    sessao.add(UsoIA(id_prof=usuario.id_usuario, tipo=tipo))
+    sessao.commit()

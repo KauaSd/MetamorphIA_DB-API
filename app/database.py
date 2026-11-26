@@ -356,6 +356,14 @@ class RefreshToken(base):
     criado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class UsoIA(base):
+    __tablename__ = "uso_ia"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    id_prof = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=False, index=True)
+    tipo = Column(String(30), nullable=False, index=True)  # "adaptacao" | "pei"
+    criado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
 # Aliases de classes para manter 100% de compatibilidade com imports legados
 professores = Usuario
 turmas = Turma
@@ -365,8 +373,8 @@ mensagens = Mensagem
 
 
 PLANOS_PADRAO = {
-    "normal": {"max_escolas": 3, "max_turmas_por_escola": 2, "max_alunos_por_turma": 2},
-    "pro": {"max_escolas": 10, "max_turmas_por_escola": 5, "max_alunos_por_turma": 10},
+    "normal": {"max_escolas": 3, "max_turmas_por_escola": 2, "max_alunos_por_turma": 5},
+    "pro": {"max_escolas": 10, "max_turmas_por_escola": None, "max_alunos_por_turma": 30},
     "institucional": {"max_escolas": 1, "max_turmas_por_escola": None, "max_alunos_por_turma": None},
     "institucional_plus": {"max_escolas": None, "max_turmas_por_escola": None, "max_alunos_por_turma": None},
 }
@@ -390,9 +398,17 @@ def garantir_planos_iniciais(sessao: Session) -> dict[str, Plano]:
             sessao.add(novo)
             existentes[nome] = novo
             alterou = True
-        elif existentes[nome].max_escolas != cfg["max_escolas"]:
-            existentes[nome].max_escolas = cfg["max_escolas"]
-            alterou = True
+        else:
+            plano_atual = existentes[nome]
+            if (
+                plano_atual.max_escolas != cfg["max_escolas"]
+                or plano_atual.max_turmas_por_escola != cfg["max_turmas_por_escola"]
+                or plano_atual.max_alunos_por_turma != cfg["max_alunos_por_turma"]
+            ):
+                plano_atual.max_escolas = cfg["max_escolas"]
+                plano_atual.max_turmas_por_escola = cfg["max_turmas_por_escola"]
+                plano_atual.max_alunos_por_turma = cfg["max_alunos_por_turma"]
+                alterou = True
     if alterou:
         sessao.commit()
         for p in existentes.values():

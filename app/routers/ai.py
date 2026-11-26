@@ -27,7 +27,7 @@ import httpx
 from config.settings import settings
 from pydantic import BaseModel, Field
 from services.disciplinas import registrar_status_pei_disciplina
-from services.planos import obter_contexto_escola
+from services.planos import obter_contexto_escola, validar_e_registrar_cota_ia
 from services.storage import (
     excluir_arquivos_por_conversa,
     extrair_texto_docx_bytes_storage,
@@ -513,6 +513,7 @@ async def chat_adaptar_atividade_aluno_ia(
     sessao: Session = Depends(pegar_bd),
 ):
     """Recebe um arquivo do professor no chat do aluno e retorna a atividade adaptada + arquivo .docx na resposta."""
+    validar_e_registrar_cota_ia(sessao, professor, "adaptacao")
     payload.gerar_arquivo_atividade = True
     return await chat_aluno_ia(
         id_aluno=id_aluno,
@@ -789,6 +790,7 @@ async def criar_pei_aluno_ia(
 ):
     """Envia as respostas do questionário à API de IA para gerar um PEI completo em formato .docx e o perfil_ia."""
     aluno_obj = _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=True)
+    validar_e_registrar_cota_ia(sessao, professor, "pei")
     corpo = {
         "id_prof": professor.id_prof,
         **payload.model_dump(exclude_none=True),
@@ -1041,8 +1043,10 @@ async def adaptar_atividade_ia(
     payload: AdaptarAtividadeRequest,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
     professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    sessao: Session = Depends(pegar_bd),
 ):
     """Envia uma atividade para a IA gerar adaptações curriculares fundamentadas no DUA."""
+    validar_e_registrar_cota_ia(sessao, professor, "adaptacao")
     dados = payload.model_dump(exclude_none=True)
     if "instrucoes_ia" not in dados and getattr(professor, "instrucoes_ia", None):
         dados["instrucoes_ia"] = professor.instrucoes_ia
@@ -1059,8 +1063,10 @@ async def adaptar_atividade_arquivo_ia(
     payload: AdaptarAtividadeRequest,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
     professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    sessao: Session = Depends(pegar_bd),
 ):
     """Envia um arquivo de atividade para a IA gerar a atividade adaptada e devolver o arquivo .docx ou .pdf."""
+    validar_e_registrar_cota_ia(sessao, professor, "adaptacao")
     dados = payload.model_dump(exclude_none=True)
     if "instrucoes_ia" not in dados and getattr(professor, "instrucoes_ia", None):
         dados["instrucoes_ia"] = professor.instrucoes_ia
