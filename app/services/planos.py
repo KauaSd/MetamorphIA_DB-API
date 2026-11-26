@@ -473,10 +473,21 @@ def ativar_contrato_e_permissoes(
 
     if nome_plano == "pro":
         escolas_ids = cfg.get("escolas_ids") or []
-        for esc_id in escolas_ids:
-            esc = sessao.get(Escola, esc_id)
-            if esc and esc.fk_Grupo_id_grupo == grupo_principal.id_grupo:
-                esc.fk_Contrato_id_cont = contrato.id_cont
+        if escolas_ids:
+            for esc_id in escolas_ids:
+                esc = sessao.get(Escola, esc_id)
+                if esc and esc.fk_Grupo_id_grupo == grupo_principal.id_grupo:
+                    esc.fk_Contrato_id_cont = contrato.id_cont
+        else:
+            escolas_grupo = sessao.execute(
+                select(Escola).where(Escola.fk_Grupo_id_grupo == grupo_principal.id_grupo)
+            ).scalars().all()
+            planos_por_id = {p.id_plano: p.nome_plano for p in garantir_planos_iniciais(sessao).values()}
+            for esc in escolas_grupo:
+                c_esc = sessao.get(Contrato, esc.fk_Contrato_id_cont) if esc.fk_Contrato_id_cont else None
+                p_nome = planos_por_id.get(c_esc.fk_Plano_id_plano, "normal") if c_esc else "normal"
+                if p_nome in ("normal", "pro"):
+                    esc.fk_Contrato_id_cont = contrato.id_cont
 
     elif nome_plano == "institucional":
         pode_chat_adm = True if cfg.get("adm_pode_chat") is None else bool(cfg.get("adm_pode_chat"))
