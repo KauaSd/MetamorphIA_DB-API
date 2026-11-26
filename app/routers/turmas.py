@@ -2,7 +2,7 @@ from database import Session, User_esc, pegar_bd, professores, select, turmas
 from dependencies import pegar_professor_logado
 from fastapi import APIRouter, Depends, HTTPException, status
 from schemas.schemas import Turma, TurmaSchema
-from services.planos import obter_contexto_escola
+from services.planos import listar_escolas_usuario, obter_contexto_escola
 from services.turma import AdicionarTurma, DeletaTurma, EditarTurma, PesquisarTurma
 
 Turma_router = APIRouter(prefix="/turma", tags=["turma"])
@@ -56,6 +56,9 @@ def pesquisar(
         {
             "id_turma": t.id_turma,
             "nome_turma": t.nome_turma,
+            "serie_ano": getattr(t, "serie_ano", None),
+            "letra": getattr(t, "letra", None),
+            "horario": getattr(t, "horario", None),
             "id_prof": t.id_prof,
             "id_escola": t.fk_Escola_id_escola,
         }
@@ -75,12 +78,13 @@ def ListarTurmas(
             obter_contexto_escola(sessao, professor_logado.id_prof, id_escola)
             stmt = stmt.where(turmas.fk_Escola_id_escola == id_escola)
         else:
-            escolas_vinculadas = select(User_esc.fk_Escola_id_escola).where(
-                User_esc.fk_Usuario_id_usuario == professor_logado.id_prof
-            )
+            escolas_ids_visiveis = [
+                e["id_escola"] for e in listar_escolas_usuario(sessao, professor_logado)
+            ]
             stmt = stmt.where(
-                (turmas.id_prof == professor_logado.id_prof)
-                | (turmas.fk_Escola_id_escola.in_(escolas_vinculadas))
+                turmas.fk_Escola_id_escola.in_(escolas_ids_visiveis)
+                if escolas_ids_visiveis
+                else (turmas.id_prof == -1)
             )
     elif id_escola is not None:
         stmt = stmt.where(turmas.fk_Escola_id_escola == id_escola)
@@ -89,6 +93,9 @@ def ListarTurmas(
         {
             "id_turma": t.id_turma,
             "nome_turma": t.nome_turma,
+            "serie_ano": getattr(t, "serie_ano", None),
+            "letra": getattr(t, "letra", None),
+            "horario": getattr(t, "horario", None),
             "id_prof": t.id_prof,
             "id_escola": t.fk_Escola_id_escola,
         }
@@ -110,6 +117,9 @@ def ObterTurmaPorId(
     return {
         "id_turma": turma.id_turma,
         "nome_turma": turma.nome_turma,
+        "serie_ano": getattr(turma, "serie_ano", None),
+        "letra": getattr(turma, "letra", None),
+        "horario": getattr(turma, "horario", None),
         "id_prof": turma.id_prof,
         "id_escola": turma.fk_Escola_id_escola,
     }

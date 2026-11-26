@@ -42,12 +42,14 @@ def _validar_acesso_gerenciamento_turma(sessao: Session, id_prof: int, id_turma:
 
 def DeletaAluno(id_aluno: int, sessao: Session, id_prof: int):
     try:
-        from database import conversas, delete, mensagem_al, mensagens
+        from database import ArquivoAnexo, PeiDisciplina, conversas, delete, mensagem_al, mensagens
 
         aluno = sessao.get(alunos, id_aluno)
         if not aluno:
             raise HTTPException(status_code=404, detail="aluno não encontrado")
         _validar_acesso_gerenciamento_turma(sessao, id_prof, aluno.fk_Turma_id_turma)
+        sessao.execute(delete(ArquivoAnexo).where(ArquivoAnexo.id_aluno == id_aluno))
+        sessao.execute(delete(PeiDisciplina).where(PeiDisciplina.id_aluno == id_aluno))
         sessao.execute(delete(mensagem_al).where(mensagem_al.c.id_aluno == id_aluno))
         sessao.execute(delete(mensagens).where(mensagens.fk_Aluno_id_aluno == id_aluno))
         sessao.execute(delete(conversas).where(conversas.fk_Aluno_id_aluno == id_aluno))
@@ -88,7 +90,8 @@ def RecebeAluno(form: Aluno, sessao: Session, id_prof: int):
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "mensagem": f"Limite de {max_alunos} alunos por turma atingido no plano '{ctx['plano']}'.",
-                    "codigo_erro": "LIMITE_PLANO_ATINGIDO",
+                    "codigo_erro": "LIMITE_ALUNOS_ATINGIDO",
+                    "tipo_limite": "aluno",
                     "upgrade_sugerido": True,
                     "opcoes_upgrade": ["pro", "institucional", "institucional_plus"],
                 },
@@ -187,7 +190,8 @@ def EditaAluno(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "mensagem": f"Limite de {max_alunos} alunos por turma atingido na turma de destino.",
-                    "codigo_erro": "LIMITE_PLANO_ATINGIDO",
+                    "codigo_erro": "LIMITE_ALUNOS_ATINGIDO",
+                    "tipo_limite": "aluno",
                     "upgrade_sugerido": True,
                     "opcoes_upgrade": ["pro", "institucional", "institucional_plus"],
                 },

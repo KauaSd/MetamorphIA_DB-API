@@ -523,6 +523,18 @@ async def chat_adaptar_atividade_aluno_ia(
     )
 
 
+@AI_router.get("/conversas")
+def listar_conversas_lote_ia(
+    professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    aluno_ids: Optional[str] = None,
+    sessao: Session = Depends(pegar_bd),
+):
+    """Lista conversas de múltiplos alunos em lote agrupadas por id_aluno."""
+    from routers.students import listar_conversas_em_lote_para_usuario
+
+    return listar_conversas_em_lote_para_usuario(sessao, professor, aluno_ids)
+
+
 @AI_router.get("/chat/aluno/{id_aluno}/conversas")
 async def listar_conversas_aluno_ia(
     id_aluno: int,
@@ -809,7 +821,7 @@ async def criar_pei_aluno_ia(
 
 
 @AI_router.get("/pei/aluno/{id_aluno}")
-async def listar_peis_aluno_ia(
+def listar_peis_aluno_ia(
     id_aluno: int,
     professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
     sessao: Session = Depends(pegar_bd),
@@ -840,7 +852,7 @@ async def listar_peis_aluno_ia(
 
 
 @AI_router.get("/pei/aluno/{id_aluno}/{pei_id}")
-async def obter_pei_detalhe_ia(
+def obter_pei_detalhe_ia(
     id_aluno: int,
     pei_id: str,
     professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
@@ -901,7 +913,7 @@ async def importar_pei_aluno_ia(
 
 
 @AI_router.get("/pei/aluno/{id_aluno}/{pei_id}/docx")
-async def baixar_pei_docx_ia(
+def baixar_pei_docx_ia(
     id_aluno: int,
     pei_id: str,
     professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
@@ -980,6 +992,20 @@ async def gerar_perfil_aluno_ia(
         sessao.rollback()
 
     return resposta
+
+
+@AI_router.get("/aluno/{id_aluno}/descricao-breve")
+async def descricao_breve_aluno_ia(
+    id_aluno: int,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
+    _professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+):
+    """Retorna uma descrição breve do aluno para o card Perfil do Aluno."""
+    return await _encaminhar_requisicao_ia(
+        metodo="GET",
+        endpoint=f"/alunos/{id_aluno}/descricao-breve",
+        token=credentials.credentials,
+    )
 
 
 @AI_router.get("/dashboard/aluno/{id_aluno}")

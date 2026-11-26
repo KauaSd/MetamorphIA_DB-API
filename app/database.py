@@ -21,12 +21,20 @@ from sqlalchemy import Enum as sqlenum
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, declarative_base, relationship, synonym
 
-_connect_args = (
-    {"check_same_thread": False}
-    if settings.BD_ACCESS.startswith("sqlite")
-    else {}
+_is_sqlite = settings.BD_ACCESS.startswith("sqlite")
+_connect_args = {"check_same_thread": False} if _is_sqlite else {}
+_engine_kwargs = (
+    {"connect_args": _connect_args}
+    if _is_sqlite
+    else {
+        "connect_args": _connect_args,
+        "pool_size": 5,
+        "max_overflow": 5,
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+    }
 )
-engine = create_engine(settings.BD_ACCESS, connect_args=_connect_args)
+engine = create_engine(settings.BD_ACCESS, **_engine_kwargs)
 
 base = declarative_base()
 
@@ -52,6 +60,7 @@ class Usuario(base):
     __tablename__ = "usuario"
     id_usuario = Column(Integer, primary_key=True, autoincrement=True)
     nome_usuario = Column(String(150), nullable=False)
+    nome_real = Column(String(150), nullable=True)
     email_usuario = Column(String(150), unique=True, index=True, nullable=True)
     telefone_usuario = Column(String(20), unique=True, index=True, nullable=True)
     senha_usuario = Column(String(255), nullable=True)
@@ -62,6 +71,10 @@ class Usuario(base):
     modo_ativo = Column(String(30), nullable=False, default="adm")
     tags_usuario = Column(Text, nullable=True)
     instrucoes_ia = Column(Text, nullable=True)
+    perfil_professor_feito = Column(Boolean, nullable=False, default=False)
+    identificacao_feita = Column(Boolean, nullable=False, default=False)
+    tutorial_visto = Column(Boolean, nullable=False, default=False)
+    tutorial_institucional_visto = Column(Boolean, nullable=False, default=False)
     token_version = Column(Integer, nullable=False, default=1)
 
     # Synonyms para retrocompatibilidade total com código que referencia 'professores'
@@ -103,8 +116,23 @@ class Escola(base):
     id_escola = Column(Integer, primary_key=True, autoincrement=True)
     nome_escola = Column(String(150), nullable=False)
     email_institucional = Column(String(150), nullable=True)
+    codigo_convite = Column(String(20), nullable=True, unique=True, index=True)
     fk_Grupo_id_grupo = Column(Integer, ForeignKey("grupo.id_grupo"), nullable=False)
     fk_Contrato_id_cont = Column(Integer, ForeignKey("contrato.id_cont"), nullable=True)
+
+
+class ConviteEscola(base):
+    __tablename__ = "convite_escola"
+    id_convite = Column(Integer, primary_key=True, autoincrement=True)
+    fk_Escola_id_escola = Column(Integer, ForeignKey("escola.id_escola"), nullable=False, index=True)
+    fk_Usuario_convidado_id = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=True, index=True)
+    email_convidado = Column(String(150), nullable=False, index=True)
+    codigo_convite = Column(String(20), nullable=False)
+    tags_areas = Column(Text, nullable=True)
+    status = Column(String(30), nullable=False, default="pendente")
+    criado_por_id = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=False)
+    criado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    respondido_em = Column(DateTime(timezone=True), nullable=True)
 
 
 class User_grupo(base):
@@ -171,6 +199,9 @@ class Turma(base):
     __tablename__ = "turma"
     id_turma = Column(Integer, primary_key=True, autoincrement=True)
     nome_turma = Column(String(100), nullable=False)
+    serie_ano = Column(String(60), nullable=True)
+    letra = Column(String(20), nullable=True)
+    horario = Column(String(60), nullable=True)
     fk_Escola_id_escola = Column(Integer, ForeignKey("escola.id_escola"), nullable=False)
     fk_Usuario_id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=True)
 
@@ -431,6 +462,16 @@ def _garantir_colunas_novas(eng) -> None:
                 comandos.append("ALTER TABLE usuario ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1")
             if "modo_ativo" not in colunas_usuario:
                 comandos.append("ALTER TABLE usuario ADD COLUMN modo_ativo VARCHAR(30) NOT NULL DEFAULT 'adm'")
+            if "nome_real" not in colunas_usuario:
+                comandos.append("ALTER TABLE usuario ADD COLUMN nome_real VARCHAR(150)")
+            if "perfil_professor_feito" not in colunas_usuario:
+                comandos.append("ALTER TABLE usuario ADD COLUMN perfil_professor_feito BOOLEAN NOT NULL DEFAULT FALSE")
+            if "identificacao_feita" not in colunas_usuario:
+                comandos.append("ALTER TABLE usuario ADD COLUMN identificacao_feita BOOLEAN NOT NULL DEFAULT FALSE")
+            if "tutorial_visto" not in colunas_usuario:
+                comandos.append("ALTER TABLE usuario ADD COLUMN tutorial_visto BOOLEAN NOT NULL DEFAULT FALSE")
+            if "tutorial_institucional_visto" not in colunas_usuario:
+                comandos.append("ALTER TABLE usuario ADD COLUMN tutorial_institucional_visto BOOLEAN NOT NULL DEFAULT FALSE")
         if insp.has_table("aluno"):
             colunas_aluno = {c["name"] for c in insp.get_columns("aluno")}
             tipo_ts = "TIMESTAMPTZ" if eng.dialect.name == "postgresql" else "TIMESTAMP"
@@ -442,6 +483,18 @@ def _garantir_colunas_novas(eng) -> None:
                 comandos.append("ALTER TABLE aluno ADD COLUMN indicadores_desenvolvimento_json TEXT")
             if "metas_bimestre_json" not in colunas_aluno:
                 comandos.append("ALTER TABLE aluno ADD COLUMN metas_bimestre_json TEXT")
+        if insp.has_table("turma"):
+            colunas_turma = {c["name"] for c in insp.get_columns("turma")}
+            if "serie_ano" not in colunas_turma:
+                comandos.append("ALTER TABLE turma ADD COLUMN serie_ano VARCHAR(60)")
+            if "letra" not in colunas_turma:
+                comandos.append("ALTER TABLE turma ADD COLUMN letra VARCHAR(20)")
+            if "horario" not in colunas_turma:
+                comandos.append("ALTER TABLE turma ADD COLUMN horario VARCHAR(60)")
+        if insp.has_table("escola"):
+            colunas_escola = {c["name"] for c in insp.get_columns("escola")}
+            if "codigo_convite" not in colunas_escola:
+                comandos.append("ALTER TABLE escola ADD COLUMN codigo_convite VARCHAR(20)")
         if comandos:
             with eng.begin() as conn:
                 for sql in comandos:

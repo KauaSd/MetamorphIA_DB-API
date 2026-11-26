@@ -8,6 +8,7 @@ from config.settings import settings
 from database import (
     Aluno,
     Contrato,
+    ConviteEscola,
     Escola,
     Grupo,
     Nota_fiscal,
@@ -25,9 +26,11 @@ from database import (
 )
 from fastapi import HTTPException, status
 from schemas.schemas import (
+    AceitarConviteEscolaRequest,
     AdicionarProfessorRequest,
     AtualizarTagsRequest,
     ContratarPlanoRequest,
+    ConvidarProfessorRequest,
     CriarEscolaRequest,
     Tipo2FA,
 )
@@ -143,7 +146,11 @@ def obter_contexto_escola(
             papel = "adm"
 
     modo_usuario = getattr(usuario, "modo_ativo", "adm") or "adm"
-    if usuario.tipo_usuario in ("adm_escola", "adm_pro_plus") and modo_usuario == "professor":
+    if (
+        usuario.tipo_usuario in ("adm_escola", "adm_pro_plus")
+        and modo_usuario == "professor"
+        and nome_plano in ("institucional", "institucional_plus")
+    ):
         papel = "professor"
 
     if usuario.tipo_usuario == "adm_institucional":
@@ -175,12 +182,21 @@ def obter_contexto_escola(
     )
     max_usuarios = contrato.max_qtd_user if contrato else 1
 
+    institucional_flag = nome_plano in ("institucional", "institucional_plus")
+    codigo_conv = getattr(escola, "codigo_convite", None)
+    if institucional_flag and not codigo_conv:
+        codigo_conv = f"ESC-{secrets.token_hex(3).upper()}"
+        escola.codigo_convite = codigo_conv
+        sessao.commit()
+
     resultado = {
         "id_escola": escola.id_escola,
         "nome_escola": escola.nome_escola,
         "id_grupo": escola.fk_Grupo_id_grupo,
         "id_contrato": contrato.id_cont if contrato else None,
         "plano": nome_plano,
+        "institucional": institucional_flag,
+        "codigo_convite": codigo_conv if papel in ("adm", "adm_sistema") and institucional_flag else None,
         "papel": papel,
         "pode_chat": pode_chat,
         "tags_areas": tags_lista,
@@ -274,7 +290,8 @@ def criar_escola_no_grupo(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "mensagem": f"Limite de {limite_inst} escolas do contrato Institucional+ atingido.",
-                    "codigo_erro": "LIMITE_PLANO_ATINGIDO",
+                    "codigo_erro": "LIMITE_ESCOLAS_ATINGIDO",
+                    "tipo_limite": "escola",
                     "upgrade_sugerido": True,
                     "opcoes_upgrade": ["institucional_plus"],
                 },
@@ -342,7 +359,8 @@ def criar_escola_no_grupo(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "mensagem": "Você ainda não possui o plano Pro ativo.",
-                    "codigo_erro": "LIMITE_PLANO_ATINGIDO",
+                    "codigo_erro": "PLANO_PRO_NAO_CONTRATADO",
+                    "tipo_limite": "escola",
                     "upgrade_sugerido": True,
                     "opcoes_upgrade": ["pro", "institucional", "institucional_plus"],
                 },
@@ -353,7 +371,8 @@ def criar_escola_no_grupo(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "mensagem": f"Limite de {limite_pro} escolas no plano Pro atingido.",
-                    "codigo_erro": "LIMITE_PLANO_ATINGIDO",
+                    "codigo_erro": "LIMITE_ESCOLAS_ATINGIDO",
+                    "tipo_limite": "escola",
                     "upgrade_sugerido": True,
                     "opcoes_upgrade": ["institucional", "institucional_plus"],
                 },
@@ -376,7 +395,8 @@ def criar_escola_no_grupo(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "mensagem": "Limite de escolas atingido no plano atual. Melhore seu plano para adicionar mais escolas!",
-                "codigo_erro": "LIMITE_PLANO_ATINGIDO",
+                "codigo_erro": "LIMITE_ESCOLAS_ATINGIDO",
+                "tipo_limite": "escola",
                 "upgrade_sugerido": True,
                 "opcoes_upgrade": ["pro", "institucional", "institucional_plus"],
             },
@@ -810,6 +830,350 @@ def adicionar_professor_escola(
     }
 
 
+def _garantir_codigo_convite_escola(sessao: Session, escola: Escola) -> str:
+    codigo = getattr(escola, "codigo_convite", None)
+    if codigo:
+        return codigo
+    codigo = f"ESC-{secrets.token_hex(3).upper()}"
+    escola.codigo_convite = codigo
+    sessao.commit()
+    invalidar_cache_permissoes()
+    return codigo
+
+
+def obter_codigo_escola(
+    sessao: Session,
+    adm_logado: Usuario,
+    id_escola: int,
+    regenerar: bool = False,
+) -> dict[str, Any]:
+    ctx = obter_contexto_escola(sessao, adm_logado.id_usuario, id_escola)
+    if ctx["papel"] not in ("adm", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador da escola pode gerenciar o código de convite.",
+        )
+    if ctx["plano"] not in ("institucional", "institucional_plus"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="O código de convite da escola é exclusivo de escolas com plano Institucional.",
+        )
+    escola = sessao.get(Escola, id_escola)
+    if not escola:
+        raise HTTPException(status_code=404, detail="Escola não encontrada.")
+    if regenerar:
+        escola.codigo_convite = f"ESC-{secrets.token_hex(3).upper()}"
+        sessao.commit()
+        invalidar_cache_permissoes()
+    codigo = _garantir_codigo_convite_escola(sessao, escola)
+    return {"id_escola": id_escola, "nome_escola": escola.nome_escola, "codigo_convite": codigo}
+
+
+def convidar_professor_escola(
+    sessao: Session,
+    adm_logado: Usuario,
+    id_escola: int,
+    dados: ConvidarProfessorRequest,
+) -> dict[str, Any]:
+    """Cria um convite pendente (notificação) para o e-mail informado usando o código da escola."""
+    ctx = obter_contexto_escola(sessao, adm_logado.id_usuario, id_escola)
+    if ctx["papel"] not in ("adm", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador da escola pode convidar professores.",
+        )
+    if ctx["plano"] not in ("institucional", "institucional_plus"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Convites por código são exclusivos de escolas com plano Institucional.",
+        )
+
+    professores_atuais = sessao.execute(
+        select(User_esc).where(
+            User_esc.fk_Escola_id_escola == id_escola,
+            User_esc.papel == "professor",
+        )
+    ).scalars().all()
+    max_users = ctx["max_usuarios"] or 1
+    if len(professores_atuais) >= max_users:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Limite de {max_users} professores atingido para esta escola.",
+        )
+
+    escola = sessao.get(Escola, id_escola)
+    if not escola:
+        raise HTTPException(status_code=404, detail="Escola não encontrada.")
+    codigo = _garantir_codigo_convite_escola(sessao, escola)
+
+    email_norm = dados.email.strip().lower()
+    prof = sessao.execute(
+        select(Usuario).where(Usuario.email_usuario == email_norm)
+    ).scalars().first()
+    if prof:
+        ja_vinculado = sessao.execute(
+            select(User_esc).where(
+                User_esc.fk_Usuario_id_usuario == prof.id_usuario,
+                User_esc.fk_Escola_id_escola == id_escola,
+            )
+        ).scalars().first()
+        if ja_vinculado:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Este usuário já está vinculado a esta escola.",
+            )
+
+    tags_str = _normalizar_tags(dados.tags_areas)
+    existente = sessao.execute(
+        select(ConviteEscola).where(
+            ConviteEscola.fk_Escola_id_escola == id_escola,
+            ConviteEscola.email_convidado == email_norm,
+            ConviteEscola.status == "pendente",
+        )
+    ).scalars().first()
+    if existente:
+        existente.codigo_convite = codigo
+        existente.tags_areas = tags_str
+        existente.fk_Usuario_convidado_id = prof.id_usuario if prof else None
+        convite = existente
+    else:
+        convite = ConviteEscola(
+            fk_Escola_id_escola=id_escola,
+            fk_Usuario_convidado_id=prof.id_usuario if prof else None,
+            email_convidado=email_norm,
+            codigo_convite=codigo,
+            tags_areas=tags_str,
+            status="pendente",
+            criado_por_id=adm_logado.id_usuario,
+        )
+        sessao.add(convite)
+
+    sessao.commit()
+    sessao.refresh(convite)
+
+    import os
+    from email.message import EmailMessage
+    import smtplib
+
+    base_front = (
+        (dados.link_base or "").strip()
+        or os.getenv("FRONTEND_URL", "http://localhost:3000").strip()
+    ).rstrip("/")
+    link_convite = f"{base_front}/vincular-instituicao?convite={convite.id_convite}&escola={id_escola}"
+
+    email_enviado = False
+    if settings.MAIL_USERNAME and settings.MAIL_PASSWORD:
+        msg = EmailMessage()
+        msg["Subject"] = f"Convite para participar de {escola.nome_escola} - MetamorphIA"
+        msg["From"] = settings.MAIL_USERNAME
+        msg["To"] = email_norm
+        msg.set_content(
+            f"Olá!\n\n"
+            f"A instituição {escola.nome_escola} convidou você (por {adm_logado.nome_usuario}) "
+            f"para participar do plano Institucional na MetamorphIA.\n\n"
+            f"Acesse o link abaixo para abrir o modal de vinculação e inserir o código fornecido pela escola:\n"
+            f"{link_convite}\n"
+        )
+        try:
+            with smtplib.SMTP(settings.MAIL_SERVER, settings.MAIL_PORT, timeout=10) as server:
+                server.starttls()
+                server.login(settings.MAIL_USERNAME, settings.MAIL_PASSWORD)
+                server.send_message(msg)
+            email_enviado = True
+        except Exception as exc:
+            print(f"[ConviteEscola] Falha ao enviar e-mail SMTP: {exc}")
+
+    return {
+        "mensagem": "Convite enviado com sucesso. O professor receberá o link por e-mail e a notificação para informar o código da escola.",
+        "id_convite": convite.id_convite,
+        "id_escola": id_escola,
+        "nome_escola": escola.nome_escola,
+        "email_convidado": email_norm,
+        "codigo_convite": codigo,
+        "link_convite": link_convite,
+        "email_enviado": email_enviado,
+        "status": convite.status,
+    }
+
+
+def obter_detalhe_convite_usuario(
+    sessao: Session, usuario: Usuario, id_convite: int
+) -> dict[str, Any]:
+    """Retorna os dados de um convite específico para preencher o modal 'Vincular à instituição'."""
+    email_u = (usuario.email_usuario or "").strip().lower()
+    convite = sessao.get(ConviteEscola, id_convite)
+    if not convite or (
+        convite.fk_Usuario_convidado_id != usuario.id_usuario
+        and convite.email_convidado != email_u
+    ):
+        raise HTTPException(status_code=404, detail="Convite não encontrado para o seu usuário.")
+    esc = sessao.get(Escola, convite.fk_Escola_id_escola)
+    adm = sessao.get(Usuario, convite.criado_por_id)
+    return {
+        "id_convite": convite.id_convite,
+        "id_escola": convite.fk_Escola_id_escola,
+        "nome_escola": esc.nome_escola if esc else f"Escola {convite.fk_Escola_id_escola}",
+        "convidado_por": adm.nome_usuario if adm else "Administrador",
+        "tags_areas": [t for t in (convite.tags_areas or "").split(",") if t],
+        "status": convite.status,
+        "criado_em": convite.criado_em.isoformat() if convite.criado_em else None,
+    }
+
+
+def listar_convites_escola(
+    sessao: Session, adm_logado: Usuario, id_escola: int
+) -> list[dict[str, Any]]:
+    ctx = obter_contexto_escola(sessao, adm_logado.id_usuario, id_escola)
+    if ctx["papel"] not in ("adm", "adm_sistema"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Apenas o administrador da escola pode listar os convites.",
+        )
+    convites = (
+        sessao.execute(
+            select(ConviteEscola)
+            .where(ConviteEscola.fk_Escola_id_escola == id_escola)
+            .order_by(ConviteEscola.criado_em.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id_convite": c.id_convite,
+            "id_escola": c.fk_Escola_id_escola,
+            "email_convidado": c.email_convidado,
+            "tags_areas": [t for t in (c.tags_areas or "").split(",") if t],
+            "status": c.status,
+            "criado_em": c.criado_em.isoformat() if c.criado_em else None,
+        }
+        for c in convites
+    ]
+
+
+def listar_convites_pendentes_usuario(
+    sessao: Session, usuario: Usuario
+) -> list[dict[str, Any]]:
+    """Lista notificações de convites pendentes para o usuário autenticado (sem expor o código)."""
+    email_u = (usuario.email_usuario or "").strip().lower()
+    convites = (
+        sessao.execute(
+            select(ConviteEscola)
+            .where(
+                ConviteEscola.status == "pendente",
+                (ConviteEscola.fk_Usuario_convidado_id == usuario.id_usuario)
+                | (ConviteEscola.email_convidado == email_u if email_u else False),
+            )
+            .order_by(ConviteEscola.criado_em.desc())
+        )
+        .scalars()
+        .all()
+    )
+    saida: list[dict[str, Any]] = []
+    for c in convites:
+        esc = sessao.get(Escola, c.fk_Escola_id_escola)
+        adm = sessao.get(Usuario, c.criado_por_id)
+        saida.append(
+            {
+                "id_convite": c.id_convite,
+                "id_escola": c.fk_Escola_id_escola,
+                "nome_escola": esc.nome_escola if esc else f"Escola {c.fk_Escola_id_escola}",
+                "convidado_por": adm.nome_usuario if adm else "Administrador",
+                "tags_areas": [t for t in (c.tags_areas or "").split(",") if t],
+                "status": c.status,
+                "criado_em": c.criado_em.isoformat() if c.criado_em else None,
+            }
+        )
+    return saida
+
+
+def aceitar_convite_escola(
+    sessao: Session,
+    usuario: Usuario,
+    dados: AceitarConviteEscolaRequest,
+) -> dict[str, Any]:
+    """Valida o código da escola informado pelo professor e efetiva o vínculo."""
+    codigo_informado = dados.codigo_convite.strip().upper()
+    email_u = (usuario.email_usuario or "").strip().lower()
+
+    stmt = select(ConviteEscola).where(
+        ConviteEscola.status == "pendente",
+        (ConviteEscola.fk_Usuario_convidado_id == usuario.id_usuario)
+        | (ConviteEscola.email_convidado == email_u if email_u else False),
+    )
+    if dados.id_convite:
+        stmt = stmt.where(ConviteEscola.id_convite == dados.id_convite)
+    pendentes = sessao.execute(stmt).scalars().all()
+    if not pendentes:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Nenhum convite pendente encontrado para o seu usuário.",
+        )
+
+    convite_match = None
+    for c in pendentes:
+        esc = sessao.get(Escola, c.fk_Escola_id_escola)
+        codigo_real = ((esc.codigo_convite if esc else None) or c.codigo_convite or "").strip().upper()
+        if codigo_real and codigo_real == codigo_informado:
+            convite_match = c
+            break
+
+    if not convite_match:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Código da escola inválido para este convite.",
+        )
+
+    esc = sessao.get(Escola, convite_match.fk_Escola_id_escola)
+    vinc = sessao.execute(
+        select(User_esc).where(
+            User_esc.fk_Usuario_id_usuario == usuario.id_usuario,
+            User_esc.fk_Escola_id_escola == convite_match.fk_Escola_id_escola,
+        )
+    ).scalars().first()
+    if vinc:
+        if convite_match.tags_areas:
+            vinc.tags_areas = convite_match.tags_areas
+    else:
+        sessao.add(
+            User_esc(
+                fk_Usuario_id_usuario=usuario.id_usuario,
+                fk_Escola_id_escola=convite_match.fk_Escola_id_escola,
+                papel="professor",
+                tags_areas=convite_match.tags_areas or usuario.tags_usuario,
+                pode_chat=True,
+            )
+        )
+
+    convite_match.status = "aceito"
+    convite_match.fk_Usuario_convidado_id = usuario.id_usuario
+    convite_match.respondido_em = datetime.now(timezone.utc)
+    sessao.commit()
+    invalidar_cache_permissoes()
+    return {
+        "mensagem": "Convite aceito! Você agora está vinculado à escola.",
+        "id_escola": convite_match.fk_Escola_id_escola,
+        "nome_escola": esc.nome_escola if esc else "",
+        "papel": "professor",
+    }
+
+
+def recusar_convite_escola(
+    sessao: Session, usuario: Usuario, id_convite: int
+) -> dict[str, Any]:
+    email_u = (usuario.email_usuario or "").strip().lower()
+    convite = sessao.get(ConviteEscola, id_convite)
+    if not convite or convite.status != "pendente" or (
+        convite.fk_Usuario_convidado_id != usuario.id_usuario
+        and convite.email_convidado != email_u
+    ):
+        raise HTTPException(status_code=404, detail="Convite pendente não encontrado.")
+    convite.status = "recusado"
+    convite.respondido_em = datetime.now(timezone.utc)
+    sessao.commit()
+    return {"mensagem": "Convite recusado.", "id_convite": id_convite, "status": "recusado"}
+
+
 def adicionar_professor_grupo_institucional(
     sessao: Session,
     adm_logado: Usuario,
@@ -994,17 +1358,72 @@ def listar_professores_escola(
             detail="Apenas o administrador da escola pode listar os professores.",
         )
 
+    from database import PeiDisciplina
+    from services.disciplinas import normalizar_chave_disciplina
+
     vincs = sessao.execute(
         select(User_esc).where(
             User_esc.fk_Escola_id_escola == id_escola,
             User_esc.papel == "professor",
         )
     ).scalars().all()
+
+    turma_ids = [
+        t.id_turma
+        for t in sessao.execute(select(Turma).where(Turma.fk_Escola_id_escola == id_escola)).scalars().all()
+    ]
+    alunos_esc = (
+        sessao.execute(select(Aluno).where(Aluno.fk_Turma_id_turma.in_(turma_ids))).scalars().all()
+        if turma_ids
+        else []
+    )
+    aluno_ids = [a.id_aluno for a in alunos_esc]
+    multiplicador_alunos = max(1, len(aluno_ids))
+
+    pei_discs = (
+        sessao.execute(
+            select(PeiDisciplina).where(
+                PeiDisciplina.id_aluno.in_(aluno_ids),
+                PeiDisciplina.status == "concluido",
+            )
+        )
+        .scalars()
+        .all()
+        if aluno_ids
+        else []
+    )
+
     resultado = []
     for v in vincs:
         u = sessao.get(Usuario, v.fk_Usuario_id_usuario)
         if not u:
             continue
+        tags_str = v.tags_areas or u.tags_usuario or ""
+        tags_lista = [t.strip() for t in tags_str.split(",") if t.strip()]
+        chaves_tags = {normalizar_chave_disciplina(t) for t in tags_lista}
+
+        concluidos_set: set[tuple[int, str]] = set()
+        datas_prof: list[datetime] = []
+        for pd in pei_discs:
+            chave_pd = normalizar_chave_disciplina(pd.disciplina)
+            if (not chaves_tags or chave_pd in chaves_tags) and (
+                pd.id_prof == u.id_usuario or chave_pd in chaves_tags
+            ):
+                concluidos_set.add((pd.id_aluno, chave_pd))
+                if pd.atualizado_em:
+                    datas_prof.append(pd.atualizado_em)
+
+        peis_total = len(tags_lista) * multiplicador_alunos
+        peis_concluidos = len(concluidos_set)
+        percentual = round((peis_concluidos / peis_total) * 100) if peis_total > 0 else 0
+
+        ultimo_envio = max(datas_prof).strftime("%d/%m/%y") if datas_prof else None
+        proximo_periodo = None
+        validades = [a.pei_valido_ate for a in alunos_esc if a.pei_valido_ate]
+        if validades:
+            dt_prox = max(validades)
+            proximo_periodo = f"{dt_prox.strftime('%d/%m')} até {(dt_prox + timedelta(days=11)).strftime('%d/%m/%y')}"
+
         resultado.append({
             "id_usuario": u.id_usuario,
             "nome_usuario": u.nome_usuario,
@@ -1013,9 +1432,54 @@ def listar_professores_escola(
             "tipo_usuario": u.tipo_usuario,
             "papel": v.papel,
             "pode_chat": bool(v.pode_chat),
-            "tags_areas": [t for t in (v.tags_areas or "").split(",") if t],
+            "tags_areas": tags_lista,
+            "peis_concluidos": peis_concluidos,
+            "peis_total": peis_total,
+            "percentual": percentual,
+            "ultimo_envio": ultimo_envio,
+            "proximo_periodo": proximo_periodo,
         })
     return resultado
+
+
+def obter_resumo_peis_escola(
+    sessao: Session,
+    adm_logado: Usuario,
+    id_escola: int,
+) -> dict[str, Any]:
+    """Retorna o consolidado de PEIs da escola (concluídos/total, datas e detalhe por professor)."""
+    profs = listar_professores_escola(sessao, adm_logado, id_escola)
+    turma_ids = [
+        t.id_turma
+        for t in sessao.execute(select(Turma).where(Turma.fk_Escola_id_escola == id_escola)).scalars().all()
+    ]
+    alunos_esc = (
+        sessao.execute(select(Aluno).where(Aluno.fk_Turma_id_turma.in_(turma_ids))).scalars().all()
+        if turma_ids
+        else []
+    )
+    total = sum(p["peis_total"] for p in profs)
+    concluidos = sum(p["peis_concluidos"] for p in profs)
+    percentual = round((concluidos / total) * 100) if total > 0 else 0
+
+    datas_ult = [p["ultimo_envio"] for p in profs if p.get("ultimo_envio")]
+    ultimo_envio = datas_ult[0] if datas_ult else None
+    proximo_periodo = next((p["proximo_periodo"] for p in profs if p.get("proximo_periodo")), None)
+    if not proximo_periodo:
+        validades = [a.pei_valido_ate for a in alunos_esc if a.pei_valido_ate]
+        if validades:
+            dt_prox = max(validades)
+            proximo_periodo = f"{dt_prox.strftime('%d/%m')} até {(dt_prox + timedelta(days=11)).strftime('%d/%m/%y')}"
+
+    return {
+        "id_escola": id_escola,
+        "concluidos": concluidos,
+        "total": total,
+        "percentual": percentual,
+        "ultimo_envio": ultimo_envio,
+        "proximo_periodo": proximo_periodo,
+        "professores": profs,
+    }
 
 
 def remover_professor_escola(
@@ -1160,13 +1624,21 @@ def obter_painel_institucional(sessao: Session, usuario: Usuario) -> dict[str, A
             qtd_alunos = len(
                 sessao.execute(select(Aluno).where(Aluno.fk_Turma_id_turma.in_(turma_ids))).scalars().all()
             )
-        profs_esc = listar_professores_escola(sessao, usuario, id_esc)
+        resumo_peis = obter_resumo_peis_escola(sessao, usuario, id_esc)
+        profs_esc = resumo_peis["professores"]
         escolas_detalhadas.append({
             **e_ctx,
             "qtd_turmas": len(turmas_esc),
             "qtd_alunos": qtd_alunos,
             "qtd_professores": len(profs_esc),
             "professores": profs_esc,
+            "peis_resumo": {
+                "concluidos": resumo_peis["concluidos"],
+                "total": resumo_peis["total"],
+                "percentual": resumo_peis["percentual"],
+                "ultimo_envio": resumo_peis["ultimo_envio"],
+                "proximo_periodo": resumo_peis["proximo_periodo"],
+            },
         })
 
     grupo = sessao.execute(
@@ -1187,13 +1659,20 @@ def obter_painel_institucional(sessao: Session, usuario: Usuario) -> dict[str, A
 
 
 def listar_escolas_usuario(sessao: Session, usuario: Usuario) -> list[dict[str, Any]]:
-    """Lista todas as escolas às quais o usuário tem acesso com seus respectivos planos e papéis."""
+    """Lista as escolas às quais o usuário tem acesso (no modo ADM de escola paga, oculta escolas de plano normal)."""
     vincs = sessao.execute(
         select(User_esc).where(User_esc.fk_Usuario_id_usuario == usuario.id_usuario)
     ).scalars().all()
+    modo_ativo = getattr(usuario, "modo_ativo", "adm") or "adm"
+    apenas_pagas_adm = (
+        usuario.tipo_usuario in ("adm_escola", "adm_pro_plus")
+        and modo_ativo != "professor"
+    )
     resultado = []
     for v in vincs:
         ctx = obter_contexto_escola(sessao, usuario.id_usuario, v.fk_Escola_id_escola)
+        if apenas_pagas_adm and ctx.get("plano") == "normal":
+            continue
         resultado.append(ctx)
     return resultado
 

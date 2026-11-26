@@ -404,23 +404,35 @@ def renovar_tokens_por_refresh(sessao: Session, refresh_token_raw: Optional[str]
 
 def obter_perfil_completo_usuario(sessao: Session, usuario: Usuario) -> dict[str, Any]:
     """Retorna perfil completo, tela recomendada e permissões por escola para o frontend."""
-    from services.planos import listar_escolas_usuario
+    from services.planos import listar_convites_pendentes_usuario, listar_escolas_usuario
 
     claims = obter_claims_jwt_usuario(sessao, usuario)
     escolas = listar_escolas_usuario(sessao, usuario)
+    convites_pendentes = listar_convites_pendentes_usuario(sessao, usuario)
     eh_adm_sistema = usuario.tipo_usuario == "adm_sistema"
     eh_adm_rede = usuario.tipo_usuario == "adm_institucional"
     modo_ativo = getattr(usuario, "modo_ativo", "adm") or "adm"
     eh_adm_escola_ativo = usuario.tipo_usuario in ("adm_escola", "adm_pro_plus") and modo_ativo != "professor"
     eh_adm_alguma_escola = any(e.get("papel") == "adm" for e in escolas)
+    escola_institucional = any(bool(e.get("institucional")) for e in escolas) or usuario.tipo_usuario in (
+        "adm_institucional",
+        "prof_institucional",
+        "adm_pro_plus",
+    )
 
     return {
         "id_usuario": usuario.id_usuario,
         "nome_usuario": usuario.nome_usuario,
+        "nome_real": getattr(usuario, "nome_real", None),
         "email_usuario": usuario.email_usuario,
         "telefone_usuario": usuario.telefone_usuario,
         "tipo_usuario": usuario.tipo_usuario,
         "modo_ativo": modo_ativo,
+        "perfil_professor_feito": bool(getattr(usuario, "perfil_professor_feito", False)),
+        "identificacao_feita": bool(getattr(usuario, "identificacao_feita", False)),
+        "tutorial_visto": bool(getattr(usuario, "tutorial_visto", False)),
+        "tutorial_institucional_visto": bool(getattr(usuario, "tutorial_institucional_visto", False)),
+        "escola_institucional": escola_institucional,
         "instrucoes_ia": getattr(usuario, "instrucoes_ia", None) or "",
         "perfil": claims["perfil"],
         "tela_inicial": claims["tela_inicial"],
@@ -430,6 +442,7 @@ def obter_perfil_completo_usuario(sessao: Session, usuario: Usuario) -> dict[str
         "pode_chat": claims["pode_chat"],
         "tags": claims["tags"],
         "escolas": escolas,
+        "convites_pendentes": convites_pendentes,
         "permissoes": {
             "eh_admin_sistema": eh_adm_sistema,
             "eh_admin_rede": eh_adm_rede,
@@ -438,7 +451,7 @@ def obter_perfil_completo_usuario(sessao: Session, usuario: Usuario) -> dict[str
             "pode_gerenciar_professores": eh_adm_rede or eh_adm_escola_ativo,
             "pode_gerenciar_alunos": eh_adm_sistema or eh_adm_rede or eh_adm_alguma_escola,
             "pode_gerenciar_turmas": eh_adm_sistema or eh_adm_rede or eh_adm_alguma_escola,
-            "pode_criar_escolas": eh_adm_rede or usuario.tipo_usuario == "normal",
+            "pode_criar_escolas": eh_adm_rede or usuario.tipo_usuario in ("normal", "adm_escola"),
             "pode_chat": claims["pode_chat"],
         },
     }
@@ -927,12 +940,25 @@ def EditaProfessor(
         raise HTTPException(status_code=404, detail="professor não encontrado")
 
     try:
-        if dados.emailprof != professor.email_prof:
+        if dados.emailprof is not None and dados.emailprof != professor.email_prof:
             professor.email_prof = dados.emailprof
-        if dados.numprof != professor.num_prof:
+        if dados.numprof is not None and dados.numprof != professor.num_prof:
             professor.num_prof = dados.numprof
-        if dados.nomeProf != professor.nome_prof:
-            professor.nome_prof = dados.nomeProf
+
+        era_primeiro_perfil = not bool(getattr(professor, "perfil_professor_feito", False))
+        veio_nome_real = bool(dados.nomeReal and dados.nomeReal.strip())
+        if veio_nome_real:
+            professor.nome_real = dados.nomeReal.strip()
+            professor.perfil_professor_feito = True
+
+        if dados.nomeProf and dados.nomeProf.strip():
+            nome_limpo = dados.nomeProf.strip()
+            # No Modal 1 (primeira definição de nomeReal), não marca identificacao_feita se nomeProf
+            # apenas repetiu o nome inicial de cadastro; no Modal 2 (ou edição posterior), marca True.
+            if not (era_primeiro_perfil and veio_nome_real and nome_limpo == (professor.nome_prof or "").strip()):
+                professor.nome_prof = nome_limpo
+                professor.identificacao_feita = True
+
         if dados.tags is not None:
             professor.tags_usuario = _normalizar_tags(dados.tags)
         if dados.instrucoes_ia is not None:
@@ -941,7 +967,14 @@ def EditaProfessor(
         sessao.commit()
         sessao.refresh(professor)
 
-        return {"mensagem": "Professor editado com sucesso", "instrucoes_ia": professor.instrucoes_ia or ""}
+        return {
+            "mensagem": "Professor editado com sucesso",
+            "instrucoes_ia": professor.instrucoes_ia or "",
+            "nome_real": getattr(professor, "nome_real", None),
+            "nome_usuario": professor.nome_prof,
+            "perfil_professor_feito": bool(getattr(professor, "perfil_professor_feito", False)),
+            "identificacao_feita": bool(professor.identificacao_feita),
+        }
 
     except OperationalError as e:
         print(f"[Users] OperationalError em EditaProfessor: {e}")
@@ -955,6 +988,29 @@ def EditaProfessor(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erro interno ao editar perfil.",
         )
+
+
+def atualizar_tutorial_visto_usuario(
+    sessao: Session,
+    professor_logado: professores,
+    tutorial_visto: Optional[bool] = None,
+    tutorial_institucional_visto: Optional[bool] = None,
+) -> dict[str, Any]:
+    professor = sessao.get(professores, professor_logado.id_prof)
+    if not professor:
+        raise HTTPException(status_code=404, detail="professor não encontrado")
+    if tutorial_visto is None and tutorial_institucional_visto is None:
+        professor.tutorial_visto = True
+    else:
+        if tutorial_visto is not None:
+            professor.tutorial_visto = bool(tutorial_visto)
+        if tutorial_institucional_visto is not None:
+            professor.tutorial_institucional_visto = bool(tutorial_institucional_visto)
+    sessao.commit()
+    return {
+        "tutorial_visto": bool(professor.tutorial_visto),
+        "tutorial_institucional_visto": bool(getattr(professor, "tutorial_institucional_visto", False)),
+    }
 
 
 def atualizar_instrucoes_ia_usuario(

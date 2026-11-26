@@ -29,6 +29,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
+    max_age=600,
 )
 
 
@@ -59,8 +60,20 @@ app.include_router(Turma_router)
 
 
 @app.get("/health", tags=["health"])
-async def health() -> Response:
-    """Endpoint de verificação de integridade com teste real de conectividade ao banco."""
+def health() -> Response:
+    """Endpoint leve de liveness sem roundtrip ao banco."""
+    import json
+
+    return Response(
+        content=json.dumps({"status": "ok", "service": "api-db"}),
+        media_type="application/json",
+        status_code=200,
+    )
+
+
+@app.get("/health/deep", tags=["health"])
+def health_deep() -> Response:
+    """Endpoint de verificação profunda com teste real de conectividade ao banco."""
     import json
     from database import engine
     from sqlalchemy import text

@@ -49,7 +49,8 @@ def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "mensagem": f"Limite de {max_turmas} turmas por escola atingido no plano '{ctx['plano']}'.",
-                    "codigo_erro": "LIMITE_PLANO_ATINGIDO",
+                    "codigo_erro": "LIMITE_TURMAS_ATINGIDO",
+                    "tipo_limite": "turma",
                     "upgrade_sugerido": True,
                     "opcoes_upgrade": ["pro", "institucional", "institucional_plus"],
                 },
@@ -59,6 +60,9 @@ def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
             id_prof=id_prof,
             fk_Escola_id_escola=id_escola,
             nome_turma=form.nome,
+            serie_ano=form.serie_ano.strip() if form.serie_ano else None,
+            letra=form.letra.strip() if form.letra else None,
+            horario=form.horario.strip() if form.horario else None,
         )
         sessao.add(new)
         sessao.commit()
@@ -68,6 +72,9 @@ def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
             "id_turma": new.id_turma,
             "id_escola": new.fk_Escola_id_escola,
             "nome_turma": new.nome_turma,
+            "serie_ano": new.serie_ano,
+            "letra": new.letra,
+            "horario": new.horario,
         }
     except HTTPException:
         raise
@@ -117,6 +124,12 @@ def EditarTurma(sessao: Session, id_turma: int, form: TurmaRequest, id_prof: int
             turma.fk_Escola_id_escola = form.id_escola
 
         turma.nome_turma = form.nome
+        if form.serie_ano is not None:
+            turma.serie_ano = form.serie_ano.strip() or None
+        if form.letra is not None:
+            turma.letra = form.letra.strip() or None
+        if form.horario is not None:
+            turma.horario = form.horario.strip() or None
         sessao.commit()
         sessao.refresh(turma)
         return {
@@ -124,6 +137,9 @@ def EditarTurma(sessao: Session, id_turma: int, form: TurmaRequest, id_prof: int
             "id_turma": turma.id_turma,
             "id_escola": turma.fk_Escola_id_escola,
             "nome_turma": turma.nome_turma,
+            "serie_ano": turma.serie_ano,
+            "letra": turma.letra,
+            "horario": turma.horario,
         }
     except HTTPException:
         raise

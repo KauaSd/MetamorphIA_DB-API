@@ -2,9 +2,11 @@ from database import Session, Usuario, pegar_bd
 from dependencies import pegar_professor_logado
 from fastapi import APIRouter, Depends, Response, status
 from schemas.schemas import (
+    AceitarConviteEscolaRequest,
     AdicionarProfessorRequest,
     AtualizarTagsRequest,
     ContratarPlanoRequest,
+    ConvidarProfessorRequest,
     CriarEscolaRequest,
     EditarEscolaRequest,
 )
@@ -83,6 +85,78 @@ def painel_institucional(
     return fn_planos.obter_painel_institucional(sessao, usuario_logado)
 
 
+@Planos_router.get("/escolas/{id_escola}/codigo")
+def obter_codigo_convite_escola(
+    id_escola: int,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+):
+    return fn_planos.obter_codigo_escola(sessao, usuario_logado, id_escola, regenerar=False)
+
+
+@Planos_router.post("/escolas/{id_escola}/codigo/regenerar")
+def regenerar_codigo_convite_escola(
+    id_escola: int,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+):
+    return fn_planos.obter_codigo_escola(sessao, usuario_logado, id_escola, regenerar=True)
+
+
+@Planos_router.post("/escolas/{id_escola}/convites", status_code=status.HTTP_201_CREATED)
+def convidar_professor_na_escola(
+    id_escola: int,
+    dados: ConvidarProfessorRequest,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+):
+    return fn_planos.convidar_professor_escola(sessao, usuario_logado, id_escola, dados)
+
+
+@Planos_router.get("/escolas/{id_escola}/convites")
+def listar_convites_na_escola(
+    id_escola: int,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+):
+    return fn_planos.listar_convites_escola(sessao, usuario_logado, id_escola)
+
+
+@Planos_router.get("/escolas/convites/pendentes")
+def listar_meus_convites_pendentes(
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+):
+    return fn_planos.listar_convites_pendentes_usuario(sessao, usuario_logado)
+
+
+@Planos_router.get("/escolas/convites/{id_convite}")
+def obter_detalhe_convite(
+    id_convite: int,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+):
+    return fn_planos.obter_detalhe_convite_usuario(sessao, usuario_logado, id_convite)
+
+
+@Planos_router.post("/escolas/convites/aceitar")
+def aceitar_convite_na_escola(
+    dados: AceitarConviteEscolaRequest,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+):
+    return fn_planos.aceitar_convite_escola(sessao, usuario_logado, dados)
+
+
+@Planos_router.post("/escolas/convites/{id_convite}/recusar")
+def recusar_convite_na_escola(
+    id_convite: int,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+):
+    return fn_planos.recusar_convite_escola(sessao, usuario_logado, id_convite)
+
+
 @Planos_router.post("/escolas/{id_escola}/professores", status_code=status.HTTP_201_CREATED)
 def adicionar_professor_na_escola(
     id_escola: int,
@@ -151,6 +225,16 @@ def atualizar_tags(
     usuario_logado: Usuario = Depends(pegar_professor_logado),
 ):
     return fn_planos.atualizar_tags_professor(sessao, usuario_logado, id_usuario, dados)
+
+
+@Planos_router.get("/escolas/{id_escola}/peis/resumo")
+def obter_resumo_peis_da_escola(
+    id_escola: int,
+    sessao: Session = Depends(pegar_bd),
+    usuario_logado: Usuario = Depends(pegar_professor_logado),
+):
+    """Retorna total de PEIs concluídos/esperados, último envio, próximo período e detalhamento por professor."""
+    return fn_planos.obter_resumo_peis_escola(sessao, usuario_logado, id_escola)
 
 
 @Planos_router.get("/escolas/{id_escola}/peis/download")

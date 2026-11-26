@@ -19,6 +19,7 @@ from schemas.schemas import (
     RedefinirSenhaRequest,
     RefreshTokenRequest,
     Token,
+    TutorialVistoRequest,
     Validar2FARequest,
     VerificarCodigoSenhaRequest,
 )
@@ -158,6 +159,20 @@ def editar(
     professor_logado: professores = Depends(pegar_professor_logado),
 ):
     return users.EditaProfessor(sessao, professor_logado, dados)
+
+
+@Auth_router.patch("/tutorial")
+def atualizar_tutorial_visto(
+    dados: TutorialVistoRequest,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    return users.atualizar_tutorial_visto_usuario(
+        sessao,
+        professor_logado,
+        tutorial_visto=dados.tutorial_visto,
+        tutorial_institucional_visto=dados.tutorial_institucional_visto,
+    )
 
 
 @Auth_router.patch("/instrucoes")

@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from schemas.schemas import Aluno, Alunoschema, EditaAlunoSchema, PesquisaAluno
 from services.disciplinas import listar_status_pei_disciplinas, registrar_status_pei_disciplina
-from services.planos import obter_contexto_escola
+from services.planos import listar_escolas_usuario, obter_contexto_escola
 from services.storage import (
     excluir_arquivos_por_conversa,
     extrair_texto_docx_bytes_storage,
@@ -619,6 +619,95 @@ def DeletarConversaAlunoDB(
     return {"mensagem": "Conversa removida com sucesso.", "conversa_id": conversa_id, "documentos_removidos": len(msg_ids)}
 
 
+def listar_conversas_em_lote_para_usuario(
+    sessao: Session,
+    professor_logado: professores,
+    aluno_ids_raw: Optional[str] = None,
+) -> dict[str, list[dict[str, str]]]:
+    """Busca conversas de múltiplos alunos em lote com uma única query e validação de acesso."""
+    if getattr(professor_logado, "tipo_usuario", "normal") == "adm_institucional":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="O administrador institucional não possui permissão pedagógica de chat/conversas.",
+        )
+
+    ids_solicitados: list[int] = []
+    if aluno_ids_raw:
+        for parte in aluno_ids_raw.split(","):
+            p = parte.strip()
+            if p:
+                if not p.isdigit():
+                    raise HTTPException(status_code=400, detail=f"ID de aluno inválido: {p}")
+                ids_solicitados.append(int(p))
+
+    stmt_alunos = select(alunos)
+    if ids_solicitados:
+        stmt_alunos = stmt_alunos.where(alunos.id_aluno.in_(ids_solicitados))
+
+    if professor_logado.tipo_usuario != "adm_sistema":
+        escolas_chat = select(User_esc.fk_Escola_id_escola).where(
+            User_esc.fk_Usuario_id_usuario == professor_logado.id_prof,
+            User_esc.pode_chat.is_(True),
+        )
+        turmas_chat = select(Turma.id_turma).where(Turma.fk_Escola_id_escola.in_(escolas_chat))
+        stmt_alunos = stmt_alunos.where(
+            (alunos.id_prof == professor_logado.id_prof)
+            | (alunos.fk_Turma_id_turma.in_(turmas_chat))
+        )
+
+    alunos_permitidos = sessao.execute(stmt_alunos).scalars().all()
+    ids_permitidos = [a.id_aluno for a in alunos_permitidos]
+
+    if ids_solicitados and len(ids_permitidos) < len(set(ids_solicitados)):
+        # Verifica se algum ID solicitado existe mas o usuário não tem acesso
+        faltantes = set(ids_solicitados) - set(ids_permitidos)
+        existentes_sem_acesso = sessao.execute(
+            select(alunos.id_aluno).where(alunos.id_aluno.in_(faltantes))
+        ).scalars().all()
+        if existentes_sem_acesso:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Você não tem permissão para acessar conversas de um ou mais alunos solicitados.",
+            )
+
+    agrupado: dict[str, list[dict[str, str]]] = {str(aid): [] for aid in ids_permitidos}
+    if not ids_permitidos:
+        return agrupado
+
+    convs = (
+        sessao.execute(
+            select(conversas)
+            .where(
+                conversas.id_aluno.in_(ids_permitidos),
+                conversas.id_prof == professor_logado.id_prof,
+            )
+            .order_by(conversas.atualizado_em.desc())
+        )
+        .scalars()
+        .all()
+    )
+    for c in convs:
+        chave = str(c.id_aluno)
+        if chave in agrupado:
+            agrupado[chave].append(
+                {
+                    "conversa_id": c.id_conversa,
+                    "titulo": c.titulo or "",
+                    "data": c.atualizado_em.isoformat() if c.atualizado_em else "",
+                }
+            )
+    return agrupado
+
+
+@Student_router.get("/conversas-lote")
+def ListarConversasEmLoteDB(
+    aluno_ids: Optional[str] = None,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    return listar_conversas_em_lote_para_usuario(sessao, professor_logado, aluno_ids)
+
+
 @Student_router.get("/{id_aluno}")
 def ObterAlunoPorId(
     id_aluno: int,
@@ -674,15 +763,16 @@ def ListarAlunos(
             obter_contexto_escola(sessao, professor_logado.id_prof, turma.fk_Escola_id_escola)
             stmt = stmt.where(alunos.id_turma == id_turma)
         else:
-            escolas_vinculadas = select(User_esc.fk_Escola_id_escola).where(
-                User_esc.fk_Usuario_id_usuario == professor_logado.id_prof
-            )
+            escolas_ids_visiveis = [
+                e["id_escola"] for e in listar_escolas_usuario(sessao, professor_logado)
+            ]
             turmas_vinculadas = select(Turma.id_turma).where(
-                Turma.fk_Escola_id_escola.in_(escolas_vinculadas)
+                Turma.fk_Escola_id_escola.in_(escolas_ids_visiveis)
             )
             stmt = stmt.where(
-                (alunos.id_prof == professor_logado.id_prof)
-                | (alunos.fk_Turma_id_turma.in_(turmas_vinculadas))
+                alunos.fk_Turma_id_turma.in_(turmas_vinculadas)
+                if escolas_ids_visiveis
+                else (alunos.id_prof == -1)
             )
     elif id_turma is not None:
         stmt = stmt.where(alunos.id_turma == id_turma)

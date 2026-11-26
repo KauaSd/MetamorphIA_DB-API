@@ -3,7 +3,7 @@ from enum import Enum
 import re
 from typing import Annotated, List, Optional
 from fastapi import Form
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 
 _EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -112,8 +112,30 @@ class Alunoschema(BaseModel):
 
 
 class Turma(BaseModel):
-    nome: str = Field(..., min_length=1, max_length=100)
+    nome: Optional[str] = Field(None, max_length=100)
+    serie_ano: Optional[str] = Field(
+        None,
+        max_length=60,
+        validation_alias=AliasChoices("serie_ano", "serie", "ano_escolar"),
+    )
+    letra: Optional[str] = Field(None, max_length=20)
+    horario: Optional[str] = Field(None, max_length=60)
     id_escola: Optional[int] = Field(None, gt=0)
+
+    @model_validator(mode="after")
+    def _garantir_nome_turma(self) -> "Turma":
+        nome_limpo = (self.nome or "").strip()
+        if not nome_limpo and self.serie_ano and self.serie_ano.strip():
+            partes = [self.serie_ano.strip()]
+            if self.letra and self.letra.strip():
+                partes.append(self.letra.strip())
+            nome_limpo = " ".join(partes)
+            if self.horario and self.horario.strip():
+                nome_limpo = f"{nome_limpo} - {self.horario.strip()}"
+        if not nome_limpo:
+            raise ValueError("Informe o nome ou a série/ano da turma.")
+        self.nome = nome_limpo[:100]
+        return self
 
 
 class TurmaSchema(BaseModel):
@@ -147,7 +169,8 @@ class PesquisaAluno(BaseModel):
 
 
 class Professoredita(BaseModel):
-    nomeProf: str = Field(..., min_length=1, max_length=150)
+    nomeProf: Optional[str] = Field(None, max_length=150)
+    nomeReal: Optional[str] = Field(None, max_length=150)
     emailprof: Optional[str] = Field(None, max_length=150)
     numprof: Optional[str] = Field(None, max_length=30)
     tags: Optional[List[str] | str] = None
@@ -163,6 +186,11 @@ class Professoredita(BaseModel):
 
 class InstrucoesIARequest(BaseModel):
     instrucoes_ia: str = Field(default="", max_length=3000)
+
+
+class TutorialVistoRequest(BaseModel):
+    tutorial_visto: Optional[bool] = None
+    tutorial_institucional_visto: Optional[bool] = None
 
 
 class RecuperarSenhaRequest(BaseModel):
@@ -252,6 +280,22 @@ class AdicionarProfessorRequest(BaseModel):
         raise ValueError(
             "A senha deve ter ao menos 12 caracteres com maiúsculas, minúsculas, números e caractere especial."
         )
+
+
+class ConvidarProfessorRequest(BaseModel):
+    email: str = Field(..., max_length=150)
+    tags_areas: List[str] | str = Field(default_factory=list)
+    link_base: Optional[str] = Field(None, max_length=300)
+
+    @field_validator("email")
+    @classmethod
+    def validar_email_convite(cls, email: str) -> str:
+        return _validar_email_formato(email)
+
+
+class AceitarConviteEscolaRequest(BaseModel):
+    codigo_convite: str = Field(..., min_length=4, max_length=20)
+    id_convite: Optional[int] = Field(None, gt=0)
 
 
 class AtualizarTagsRequest(BaseModel):
