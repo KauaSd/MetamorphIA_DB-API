@@ -1,9 +1,12 @@
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
+import math
 from typing import Any, List, Literal, Optional
 import uuid
 
 from database import (
+    AlunoMemoriaVetorial,
     ArquivoAnexo,
     Session,
     Turma,
@@ -12,6 +15,7 @@ from database import (
     alunos,
     conversas,
     delete,
+    engine,
     mensagem_al,
     mensagens,
     pegar_bd,
@@ -625,6 +629,12 @@ def DeletarConversaAlunoDB(
         sessao.execute(delete(mensagens).where(mensagens.id_mensagem.in_(msg_ids)))
     if conv:
         sessao.delete(conv)
+    sessao.execute(
+        delete(AlunoMemoriaVetorial).where(
+            AlunoMemoriaVetorial.id_aluno == id_aluno,
+            AlunoMemoriaVetorial.conversa_id == conversa_id,
+        )
+    )
     excluir_arquivos_por_conversa(sessao, conversa_id, professor_logado.id_prof)
     sessao.commit()
     return {"mensagem": "Conversa removida com sucesso.", "conversa_id": conversa_id, "documentos_removidos": len(msg_ids)}
@@ -918,6 +928,215 @@ def ObterConversaPorIdDB(
     )
 
 
+class VetorChunkItem(BaseModel):
+    texto: str = Field(..., min_length=1, max_length=6000)
+    embedding: List[float] = Field(..., min_length=384, max_length=384)
+
+
+class SalvarVetoresAlunoRequest(BaseModel):
+    origem: Literal["pei", "relato_chat", "cadastro"] = "relato_chat"
+    disciplina: Optional[str] = Field(default=None, max_length=120)
+    pei_id: Optional[str] = Field(default=None, max_length=64)
+    conversa_id: Optional[str] = Field(default=None, max_length=100)
+    substituir_origem_disciplina: bool = False
+    itens: List[VetorChunkItem] = Field(default_factory=list, max_length=100)
+
+
+class BuscarVetoresAlunoRequest(BaseModel):
+    embedding: List[float] = Field(..., min_length=384, max_length=384)
+    top_k: int = Field(default=6, ge=1, le=30)
+    disciplina: Optional[str] = Field(default=None, max_length=120)
+
+
+def _similaridade_cosseno(a: List[float], b: List[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na <= 1e-12 or nb <= 1e-12:
+        return 0.0
+    return max(0.0, min(1.0, dot / (na * nb)))
+
+
+@Student_router.post("/{id_aluno}/vetores", status_code=status.HTTP_201_CREATED)
+def SalvarVetoresAluno(
+    id_aluno: int,
+    payload: SalvarVetoresAlunoRequest,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    from services.disciplinas import normalizar_chave_disciplina
+
+    aluno = sessao.get(alunos, id_aluno)
+    if not aluno:
+        raise HTTPException(status_code=404, detail="Aluno não encontrado")
+    _validar_acesso_escola_aluno(sessao, professor_logado, aluno, exigir_pode_chat=True)
+
+    disc_limpa = payload.disciplina.strip() if payload.disciplina and payload.disciplina.strip() else None
+    disc_norm = normalizar_chave_disciplina(disc_limpa) if disc_limpa else None
+
+    if payload.substituir_origem_disciplina:
+        existentes_origem = (
+            sessao.execute(
+                select(AlunoMemoriaVetorial).where(
+                    AlunoMemoriaVetorial.id_aluno == id_aluno,
+                    AlunoMemoriaVetorial.origem == payload.origem,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for reg in existentes_origem:
+            reg_disc_norm = normalizar_chave_disciplina(reg.disciplina or "") if reg.disciplina else None
+            if (disc_norm is None and reg_disc_norm is None) or (disc_norm and reg_disc_norm == disc_norm):
+                sessao.delete(reg)
+        sessao.flush()
+
+    hashes_existentes = set(
+        sessao.execute(
+            select(AlunoMemoriaVetorial.hash_chunk).where(AlunoMemoriaVetorial.id_aluno == id_aluno)
+        )
+        .scalars()
+        .all()
+    )
+
+    usa_pgvector = engine.dialect.name == "postgresql" and not isinstance(
+        AlunoMemoriaVetorial.__table__.c.embedding.type, type(AlunoMemoriaVetorial.__table__.c.texto_chunk.type)
+    )
+
+    inseridos = 0
+    for item in payload.itens:
+        texto_limpo = item.texto.strip()
+        if not texto_limpo:
+            continue
+        chave_hash = hashlib.sha256(
+            f"{id_aluno}::{payload.origem}::{disc_norm or ''}::{texto_limpo}".encode("utf-8")
+        ).hexdigest()
+        if chave_hash in hashes_existentes:
+            continue
+        hashes_existentes.add(chave_hash)
+
+        vec_floats = [float(x) for x in item.embedding]
+        emb_val: Any = vec_floats if usa_pgvector else json.dumps(vec_floats)
+        sessao.add(
+            AlunoMemoriaVetorial(
+                id_aluno=id_aluno,
+                id_prof=professor_logado.id_prof,
+                origem=payload.origem,
+                disciplina=disc_limpa,
+                pei_id=payload.pei_id,
+                conversa_id=payload.conversa_id,
+                texto_chunk=texto_limpo,
+                hash_chunk=chave_hash,
+                embedding=emb_val,
+            )
+        )
+        inseridos += 1
+
+    sessao.commit()
+    return {"id_aluno": id_aluno, "inseridos": inseridos}
+
+
+@Student_router.post("/{id_aluno}/vetores/busca")
+def BuscarVetoresAluno(
+    id_aluno: int,
+    payload: BuscarVetoresAlunoRequest,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    from services.disciplinas import normalizar_chave_disciplina
+
+    aluno = sessao.get(alunos, id_aluno)
+    if not aluno:
+        raise HTTPException(status_code=404, detail="Aluno não encontrado")
+    _validar_acesso_escola_aluno(sessao, professor_logado, aluno, exigir_pode_chat=False)
+
+    disc_filtro_norm = (
+        normalizar_chave_disciplina(payload.disciplina)
+        if payload.disciplina and payload.disciplina.strip()
+        else None
+    )
+
+    disciplinas_pei_rows = (
+        sessao.execute(
+            select(AlunoMemoriaVetorial.disciplina)
+            .where(
+                AlunoMemoriaVetorial.id_aluno == id_aluno,
+                AlunoMemoriaVetorial.origem == "pei",
+                AlunoMemoriaVetorial.disciplina.is_not(None),
+            )
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    disciplinas_pei = [d for d in disciplinas_pei_rows if d]
+
+    usa_pgvector = engine.dialect.name == "postgresql" and hasattr(
+        AlunoMemoriaVetorial.embedding, "cosine_distance"
+    )
+
+    trechos: list[dict[str, Any]] = []
+    if usa_pgvector:
+        dist_col = AlunoMemoriaVetorial.embedding.cosine_distance(payload.embedding).label("distancia")
+        stmt = select(AlunoMemoriaVetorial, dist_col).where(AlunoMemoriaVetorial.id_aluno == id_aluno)
+        if disc_filtro_norm:
+            stmt = stmt.where(AlunoMemoriaVetorial.disciplina.is_not(None))
+        stmt = stmt.order_by(dist_col.asc()).limit(payload.top_k * 2 if disc_filtro_norm else payload.top_k)
+        rows = sessao.execute(stmt).all()
+        for reg, dist in rows:
+            if disc_filtro_norm and normalizar_chave_disciplina(reg.disciplina or "") != disc_filtro_norm:
+                continue
+            sim = max(0.0, min(1.0, 1.0 - float(dist or 0.0)))
+            trechos.append(
+                {
+                    "id_vetor": reg.id_vetor,
+                    "origem": reg.origem,
+                    "disciplina": reg.disciplina,
+                    "pei_id": reg.pei_id,
+                    "texto": reg.texto_chunk,
+                    "similaridade": round(sim, 4),
+                }
+            )
+            if len(trechos) >= payload.top_k:
+                break
+    else:
+        regs = (
+            sessao.execute(
+                select(AlunoMemoriaVetorial).where(AlunoMemoriaVetorial.id_aluno == id_aluno)
+            )
+            .scalars()
+            .all()
+        )
+        ranqueados: list[tuple[float, AlunoMemoriaVetorial]] = []
+        for reg in regs:
+            if disc_filtro_norm and normalizar_chave_disciplina(reg.disciplina or "") != disc_filtro_norm:
+                continue
+            try:
+                vec = reg.embedding if isinstance(reg.embedding, list) else json.loads(reg.embedding)
+                sim = _similaridade_cosseno(payload.embedding, [float(x) for x in vec])
+            except Exception:
+                sim = 0.0
+            ranqueados.append((sim, reg))
+        ranqueados.sort(key=lambda par: par[0], reverse=True)
+        for sim, reg in ranqueados[: payload.top_k]:
+            trechos.append(
+                {
+                    "id_vetor": reg.id_vetor,
+                    "origem": reg.origem,
+                    "disciplina": reg.disciplina,
+                    "pei_id": reg.pei_id,
+                    "texto": reg.texto_chunk,
+                    "similaridade": round(float(sim), 4),
+                }
+            )
+
+    return {
+        "id_aluno": id_aluno,
+        "trechos": trechos,
+        "disciplinas_pei": disciplinas_pei,
+    }
+
+
 @Student_router.get("/{id_aluno}")
 def ObterAlunoPorId(
     id_aluno: int,
@@ -940,6 +1159,9 @@ def ObterAlunoPorId(
             metas = json.loads(aluno.metas_bimestre_json)
         except Exception:
             metas = None
+    from services.disciplinas import avaliar_conclusao_peis_professor
+
+    status_peis = avaliar_conclusao_peis_professor(sessao, aluno, professor_logado)
     return {
         "id_aluno": aluno.id_aluno,
         "nome_aluno": aluno.nome_aluno,
@@ -949,6 +1171,9 @@ def ObterAlunoPorId(
         "indicadores_desenvolvimento": indicadores,
         "metas_bimestre": metas,
         "peis_disciplinas": listar_status_pei_disciplinas(sessao, id_aluno),
+        "todos_peis_concluidos": status_peis["todos_peis_concluidos"],
+        "disciplinas_concluidas": status_peis["disciplinas_concluidas"],
+        "disciplinas_pendentes": status_peis["disciplinas_pendentes"],
         "idade_aluno": aluno.idade_aluno,
         "id_prof": aluno.id_prof,
         "id_turma": aluno.id_turma,

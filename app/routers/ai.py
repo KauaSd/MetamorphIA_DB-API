@@ -76,6 +76,9 @@ class ChatAlunoRequest(BaseModel):
         description="Formato do arquivo de atividade gerado ('docx' ou 'pdf').",
     )
     instrucoes_ia: Optional[str] = None
+    modo_teste_analisador: bool = False
+    limiar_analisador: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    modo_revisao_pei: bool = False
 
 
 class PeiRespostaItem(BaseModel):
@@ -228,8 +231,13 @@ def _validar_acesso_chat_professor_aluno(
     return _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=True)
 
 
-def _exigir_pei_valido_para_chat(aluno_obj: Any) -> None:
-    """Impede o uso do chat enquanto o PEI não for concluído ou se a validade bimestral (60 dias) expirou."""
+def _exigir_pei_valido_para_chat(
+    aluno_obj: Any,
+    sessao: Optional[Session] = None,
+    professor: Optional[Any] = None,
+    permitir_revisao_pei: bool = False,
+) -> None:
+    """Impede o uso do chat enquanto todos os PEIs das disciplinas do professor não forem concluídos e válidos."""
     if not pei_esta_valido(aluno_obj):
         if getattr(aluno_obj, "pei_feito", False):
             raise HTTPException(
@@ -241,6 +249,20 @@ def _exigir_pei_valido_para_chat(aluno_obj: Any) -> None:
             detail="É obrigatório concluir o PEI deste aluno antes de conversar com a IA.",
         )
 
+    if sessao is not None and professor is not None:
+        from services.disciplinas import avaliar_conclusao_peis_professor
+
+        status_peis = avaliar_conclusao_peis_professor(sessao, aluno_obj, professor)
+        if not status_peis["todos_peis_concluidos"] and not permitir_revisao_pei:
+            faltantes = ", ".join(status_peis["disciplinas_pendentes"])
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Para conversar no chat deste aluno, conclua primeiro todos os PEIs das suas disciplinas. "
+                    f"Pendentes: {faltantes}."
+                ),
+            )
+
 
 def _validar_segmento_id_seguro(valor: str, nome: str = "identificador") -> str:
     limpo = (valor or "").strip()
@@ -250,6 +272,22 @@ def _validar_segmento_id_seguro(valor: str, nome: str = "identificador") -> str:
             detail=f"Formato inválido para {nome}.",
         )
     return quote(limpo, safe="")
+
+
+_IA_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+
+
+def _obter_cliente_ia_http() -> httpx.AsyncClient:
+    """Reutiliza pool TCP/TLS para chamadas à API-IA sem abrir conexão por requisição."""
+    global _IA_HTTP_CLIENT
+    if httpx.AsyncClient.__name__ != "AsyncClient":
+        return httpx.AsyncClient(timeout=60.0)
+    if _IA_HTTP_CLIENT is None or _IA_HTTP_CLIENT.is_closed:
+        _IA_HTTP_CLIENT = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            timeout=60.0,
+        )
+    return _IA_HTTP_CLIENT
 
 
 async def _encaminhar_requisicao_ia(
@@ -264,7 +302,9 @@ async def _encaminhar_requisicao_ia(
     url = f"{IA_API_URL}{endpoint}"
     headers = _obter_headers(token)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    client = _obter_cliente_ia_http()
+    eh_efemero = httpx.AsyncClient.__name__ != "AsyncClient"
+    try:
         try:
             resposta = await client.request(
                 method=metodo,
@@ -272,6 +312,7 @@ async def _encaminhar_requisicao_ia(
                 headers=headers,
                 json=json_data,
                 params=params,
+                timeout=timeout,
             )
             resposta.raise_for_status()
             return resposta.json()
@@ -293,6 +334,9 @@ async def _encaminhar_requisicao_ia(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Serviço de Inteligência Artificial temporariamente indisponível.",
             ) from exc
+    finally:
+        if eh_efemero:
+            await client.aclose()
 
 
 @AI_router.post("/chat/aluno/{id_aluno}")
@@ -305,7 +349,25 @@ async def chat_aluno_ia(
 ):
     """Envia uma mensagem pedagógica sobre um aluno para a IA e recebe a resposta adaptada."""
     aluno_validado = _validar_acesso_chat_professor_aluno(sessao, professor, id_aluno)
-    _exigir_pei_valido_para_chat(aluno_validado)
+    msg_lower = (payload.mensagem or "").strip().lower()
+    radicais_edicao = ("troc", "alter", "mud", "modific", "atualiz", "edit", "ajust", "inclu", "remov", "substitu", "refa", "revis")
+    tem_edicao = any(r in msg_lower for r in radicais_edicao)
+    menciona_alvo_pei = bool(
+        "pei" in msg_lower
+        or re.search(r"\b(?:resposta|pergunta|parte|item|quest[aã]o|a|o|n[º°]?)\s*\d+\b", msg_lower)
+    )
+    eh_revisao_ou_doc_pei = bool(
+        payload.modo_revisao_pei
+        or msg_lower in ("documento", "gerar documento", "baixar pei", "enviar documento")
+        or (tem_edicao and menciona_alvo_pei)
+        or ("pei" in msg_lower and any(k in msg_lower for k in ("documento", "baixar", "gerar")))
+    ) and not payload.anexos and not payload.gerar_arquivo_atividade
+    _exigir_pei_valido_para_chat(
+        aluno_validado,
+        sessao=sessao,
+        professor=professor,
+        permitir_revisao_pei=eh_revisao_ou_doc_pei,
+    )
 
     cid = payload.conversa_id
     if cid in ("string", "", "null", "None"):
@@ -371,6 +433,9 @@ async def chat_aluno_ia(
         "formato_saida": payload.formato_saida or "docx",
         "instrucoes_ia": instrucoes_prof,
         "persistido_pelo_gateway": True,
+        "modo_teste_analisador": payload.modo_teste_analisador,
+        "limiar_analisador": payload.limiar_analisador,
+        "modo_revisao_pei": payload.modo_revisao_pei,
     }
     resposta = await _encaminhar_requisicao_ia(
         metodo="POST",
@@ -503,6 +568,28 @@ async def chat_aluno_ia(
         sessao.rollback()
 
     return resposta
+
+
+@AI_router.post("/chat/aluno/{id_aluno}/testar-analisador")
+async def testar_analisador_aluno_ia(
+    id_aluno: int,
+    payload: ChatAlunoRequest,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
+    professor: Annotated[Any, Depends(exigir_conta_autorizada_ia)],
+    sessao: Session = Depends(pegar_bd),
+):
+    """Modo Teste: executa a 1ª IA Analisadora contra o pgvector do aluno sem persistir mensagens."""
+    _validar_acesso_chat_professor_aluno(sessao, professor, id_aluno)
+    return await _encaminhar_requisicao_ia(
+        metodo="POST",
+        endpoint=f"/alunos/{id_aluno}/chat/testar-analisador",
+        token=credentials.credentials,
+        json_data={
+            "mensagem": payload.mensagem,
+            "conversa_id": payload.conversa_id,
+            "limiar_analisador": payload.limiar_analisador,
+        },
+    )
 
 
 @AI_router.post("/chat/aluno/{id_aluno}/adaptar-atividade")
@@ -991,7 +1078,7 @@ async def gerar_perfil_aluno_ia(
 ):
     """Solicita à IA a geração de síntese do perfil pedagógico a partir do histórico no PostgreSQL."""
     aluno_obj = _obter_e_validar_aluno_ia(sessao, professor, id_aluno, exigir_pode_chat=True)
-    _exigir_pei_valido_para_chat(aluno_obj)
+    _exigir_pei_valido_para_chat(aluno_obj, sessao=sessao, professor=professor)
 
     msgs_recentes = (
         sessao.execute(

@@ -42,12 +42,21 @@ def _validar_acesso_gerenciamento_turma(sessao: Session, id_prof: int, id_turma:
 
 def DeletaAluno(id_aluno: int, sessao: Session, id_prof: int):
     try:
-        from database import ArquivoAnexo, PeiDisciplina, conversas, delete, mensagem_al, mensagens
+        from database import (
+            AlunoMemoriaVetorial,
+            ArquivoAnexo,
+            PeiDisciplina,
+            conversas,
+            delete,
+            mensagem_al,
+            mensagens,
+        )
 
         aluno = sessao.get(alunos, id_aluno)
         if not aluno:
             raise HTTPException(status_code=404, detail="aluno não encontrado")
         _validar_acesso_gerenciamento_turma(sessao, id_prof, aluno.fk_Turma_id_turma)
+        sessao.execute(delete(AlunoMemoriaVetorial).where(AlunoMemoriaVetorial.id_aluno == id_aluno))
         sessao.execute(delete(ArquivoAnexo).where(ArquivoAnexo.id_aluno == id_aluno))
         sessao.execute(delete(PeiDisciplina).where(PeiDisciplina.id_aluno == id_aluno))
         sessao.execute(delete(mensagem_al).where(mensagem_al.c.id_aluno == id_aluno))

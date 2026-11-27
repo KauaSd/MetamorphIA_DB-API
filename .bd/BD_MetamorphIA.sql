@@ -7,6 +7,9 @@
 
 -- CREATE DATABASE "BD_MetamorphIA" WITH ENCODING = 'UTF8';
 
+CREATE EXTENSION IF NOT EXISTS vector;
+
+DROP TABLE IF EXISTS aluno_memoria_vetorial CASCADE;
 DROP TABLE IF EXISTS user_2fa_codes CASCADE;
 DROP TABLE IF EXISTS user_2fa_methods CASCADE;
 DROP TABLE IF EXISTS mensag_al CASCADE;
@@ -367,3 +370,25 @@ CREATE INDEX idx_aluno_turma ON Aluno(fk_Turma_id_turma);
 CREATE INDEX idx_chat_aluno_usuario ON chat(fk_Aluno_id_aluno, fk_Usuario_id_usuario);
 CREATE INDEX idx_mensagem_chat ON Mensagem(fk_chat_id_chat);
 CREATE INDEX idx_mensagem_aluno ON Mensagem(fk_Aluno_id_aluno);
+
+-- =======================================================================
+-- 16. TABELA VETORIAL POR ALUNO (pgvector - 384 dimensões)
+-- =======================================================================
+CREATE TABLE aluno_memoria_vetorial (
+    id_vetor SERIAL PRIMARY KEY,
+    id_aluno INT NOT NULL REFERENCES Aluno(id_aluno) ON DELETE CASCADE,
+    id_prof INT REFERENCES Usuario(id_usuario) ON DELETE SET NULL,
+    origem VARCHAR(40) NOT NULL,
+    disciplina VARCHAR(120),
+    pei_id VARCHAR(64),
+    conversa_id VARCHAR(100),
+    texto_chunk TEXT NOT NULL,
+    hash_chunk VARCHAR(64) NOT NULL,
+    embedding vector(384) NOT NULL,
+    criado_em TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_aluno_vetor_aluno ON aluno_memoria_vetorial(id_aluno);
+CREATE INDEX idx_aluno_vetor_origem_disc ON aluno_memoria_vetorial(id_aluno, origem, disciplina);
+CREATE INDEX idx_aluno_vetor_conversa ON aluno_memoria_vetorial(conversa_id);
+CREATE INDEX idx_aluno_vetor_hnsw ON aluno_memoria_vetorial USING hnsw (embedding vector_cosine_ops);

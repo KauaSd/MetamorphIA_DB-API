@@ -22,6 +22,10 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, declarative_base, relationship, synonym
 
 _is_sqlite = settings.BD_ACCESS.startswith("sqlite")
+try:
+    from pgvector.sqlalchemy import Vector as _PgVector
+except ImportError:
+    _PgVector = None
 _connect_args = {"check_same_thread": False} if _is_sqlite else {}
 _engine_kwargs = (
     {"connect_args": _connect_args}
@@ -364,6 +368,26 @@ class UsoIA(base):
     criado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
 
+class AlunoMemoriaVetorial(base):
+    """Armazena chunks vetorizados (pgvector 384d) de PEIs e vivências por aluno."""
+
+    __tablename__ = "aluno_memoria_vetorial"
+    id_vetor = Column(Integer, primary_key=True, autoincrement=True)
+    id_aluno = Column(Integer, ForeignKey("aluno.id_aluno", ondelete="CASCADE"), nullable=False, index=True)
+    id_prof = Column(Integer, ForeignKey("usuario.id_usuario", ondelete="SET NULL"), nullable=True, index=True)
+    origem = Column(String(40), nullable=False, index=True)  # "pei" | "relato_chat" | "cadastro"
+    disciplina = Column(String(120), nullable=True, index=True)
+    pei_id = Column(String(64), nullable=True, index=True)
+    conversa_id = Column(String(100), nullable=True, index=True)
+    texto_chunk = Column(Text, nullable=False)
+    hash_chunk = Column(String(64), nullable=False, index=True)
+    embedding = Column(
+        _PgVector(384) if (not _is_sqlite and _PgVector is not None) else Text,
+        nullable=False,
+    )
+    criado_em = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
 # Aliases de classes para manter 100% de compatibilidade com imports legados
 professores = Usuario
 turmas = Turma
@@ -519,13 +543,45 @@ def _garantir_colunas_novas(eng) -> None:
         print(f"[Aviso] Não foi possível migrar colunas novas: {exc}")
 
 
+def _garantir_extensao_e_indices_pgvector(eng) -> None:
+    """Habilita extensão pgvector e índice HNSW no PostgreSQL."""
+    if eng.dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+
+    try:
+        with eng.begin() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    except Exception as exc:
+        print(f"[Aviso] Não foi possível habilitar extensão pgvector: {exc}")
+
+
+def _garantir_indice_hnsw_pgvector(eng) -> None:
+    if eng.dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_aluno_vetor_hnsw "
+                    "ON aluno_memoria_vetorial USING hnsw (embedding vector_cosine_ops)"
+                )
+            )
+    except Exception as exc:
+        print(f"[Aviso] Não foi possível criar índice HNSW pgvector: {exc}")
+
+
 def _inicializar_banco_com_fallback() -> None:
     """Garante que o banco esteja acessível e com as tabelas criadas (fallback local apenas fora de produção)."""
     global engine
     try:
+        _garantir_extensao_e_indices_pgvector(engine)
         base.metadata.create_all(bind=engine)
         _garantir_colunas_novas(engine)
         _corrigir_fks_legadas_postgres(engine)
+        _garantir_indice_hnsw_pgvector(engine)
     except Exception as exc:
         if settings.ENVIRONMENT == "production":
             raise RuntimeError(f"Falha ao conectar/inicializar o banco de produção: {exc}") from exc
