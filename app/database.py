@@ -65,6 +65,7 @@ class Usuario(base):
     id_usuario = Column(Integer, primary_key=True, autoincrement=True)
     nome_usuario = Column(String(150), nullable=False)
     nome_real = Column(String(150), nullable=True)
+    nome_real_atualizado_em = Column(DateTime(timezone=True), nullable=True)
     email_usuario = Column(String(150), unique=True, index=True, nullable=True)
     telefone_usuario = Column(String(20), unique=True, index=True, nullable=True)
     senha_usuario = Column(String(255), nullable=True)
@@ -206,11 +207,23 @@ class Turma(base):
     serie_ano = Column(String(60), nullable=True)
     letra = Column(String(20), nullable=True)
     horario = Column(String(60), nullable=True)
+    disciplinas_json = Column(Text, nullable=True)
     fk_Escola_id_escola = Column(Integer, ForeignKey("escola.id_escola"), nullable=False)
     fk_Usuario_id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=True)
 
     id_escola = synonym("fk_Escola_id_escola")
     id_prof = synonym("fk_Usuario_id_usuario")
+
+
+class TurmaProfessor(base):
+    __tablename__ = "turma_professor"
+    id_turma_prof = Column(Integer, primary_key=True, autoincrement=True)
+    fk_Turma_id_turma = Column(Integer, ForeignKey("turma.id_turma"), nullable=False, index=True)
+    fk_Usuario_id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=False, index=True)
+    disciplinas_json = Column(Text, nullable=True)
+    __table_args__ = (
+        UniqueConstraint("fk_Turma_id_turma", "fk_Usuario_id_usuario", name="uk_turma_professor"),
+    )
 
 
 VALIDADE_PEI_DIAS = 60
@@ -504,6 +517,9 @@ def _garantir_colunas_novas(eng) -> None:
                 comandos.append("ALTER TABLE usuario ADD COLUMN modo_ativo VARCHAR(30) NOT NULL DEFAULT 'adm'")
             if "nome_real" not in colunas_usuario:
                 comandos.append("ALTER TABLE usuario ADD COLUMN nome_real VARCHAR(150)")
+            if "nome_real_atualizado_em" not in colunas_usuario:
+                tipo_ts_user = "TIMESTAMPTZ" if eng.dialect.name == "postgresql" else "TIMESTAMP"
+                comandos.append(f"ALTER TABLE usuario ADD COLUMN nome_real_atualizado_em {tipo_ts_user}")
             if "perfil_professor_feito" not in colunas_usuario:
                 comandos.append("ALTER TABLE usuario ADD COLUMN perfil_professor_feito BOOLEAN NOT NULL DEFAULT FALSE")
             if "identificacao_feita" not in colunas_usuario:
@@ -531,6 +547,8 @@ def _garantir_colunas_novas(eng) -> None:
                 comandos.append("ALTER TABLE turma ADD COLUMN letra VARCHAR(20)")
             if "horario" not in colunas_turma:
                 comandos.append("ALTER TABLE turma ADD COLUMN horario VARCHAR(60)")
+            if "disciplinas_json" not in colunas_turma:
+                comandos.append("ALTER TABLE turma ADD COLUMN disciplinas_json TEXT")
         if insp.has_table("escola"):
             colunas_escola = {c["name"] for c in insp.get_columns("escola")}
             if "codigo_convite" not in colunas_escola:

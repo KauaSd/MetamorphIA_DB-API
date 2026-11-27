@@ -925,18 +925,23 @@ def convidar_professor_escola(
     prof = sessao.execute(
         select(Usuario).where(Usuario.email_usuario == email_norm)
     ).scalars().first()
-    if prof:
-        ja_vinculado = sessao.execute(
-            select(User_esc).where(
-                User_esc.fk_Usuario_id_usuario == prof.id_usuario,
-                User_esc.fk_Escola_id_escola == id_escola,
-            )
-        ).scalars().first()
-        if ja_vinculado:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Este usuário já está vinculado a esta escola.",
-            )
+    if not prof:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Este e-mail não está cadastrado na MetamorphIA. Peça ao professor para criar uma conta primeiro.",
+        )
+
+    ja_vinculado = sessao.execute(
+        select(User_esc).where(
+            User_esc.fk_Usuario_id_usuario == prof.id_usuario,
+            User_esc.fk_Escola_id_escola == id_escola,
+        )
+    ).scalars().first()
+    if ja_vinculado:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Este usuário já está vinculado a esta escola.",
+        )
 
     tags_str = _normalizar_tags(dados.tags_areas)
     existente = sessao.execute(

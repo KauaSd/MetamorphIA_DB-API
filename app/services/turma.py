@@ -1,9 +1,11 @@
+import json
 from database import (
     Escola,
     IntegrityError,
     OperationalError,
     Session,
     Turma,
+    TurmaProfessor,
     Usuario,
     select,
     turmas,
@@ -11,6 +13,53 @@ from database import (
 from fastapi import HTTPException, status
 from schemas.schemas import Turma as TurmaRequest
 from services.planos import obter_contexto_escola, obter_escola_padrao_usuario
+
+
+def _normalizar_disciplinas_lista(valor) -> list[str]:
+    if valor is None:
+        return []
+    itens = valor.split(",") if isinstance(valor, str) else list(valor)
+    limpos: list[str] = []
+    vistos: set[str] = set()
+    for item in itens:
+        txt = str(item or "").strip()
+        if txt and txt.lower() not in vistos:
+            vistos.add(txt.lower())
+            limpos.append(txt)
+    return limpos
+
+
+def parsear_disciplinas_turma(raw: str | None) -> list[str]:
+    if not raw or not str(raw).strip():
+        return []
+    txt = str(raw).strip()
+    if txt.startswith("["):
+        try:
+            data = json.loads(txt)
+            if isinstance(data, list):
+                return _normalizar_disciplinas_lista(data)
+        except Exception:
+            pass
+    return _normalizar_disciplinas_lista(txt)
+
+
+def obter_disciplinas_turma_para_usuario(
+    sessao: Session,
+    turma: Turma,
+    id_usuario: int | None = None,
+) -> list[str]:
+    if id_usuario is not None:
+        vinc = sessao.execute(
+            select(TurmaProfessor).where(
+                TurmaProfessor.fk_Turma_id_turma == turma.id_turma,
+                TurmaProfessor.fk_Usuario_id_usuario == id_usuario,
+            )
+        ).scalars().first()
+        if vinc and vinc.disciplinas_json:
+            especificas = parsear_disciplinas_turma(vinc.disciplinas_json)
+            if especificas:
+                return especificas
+    return parsear_disciplinas_turma(getattr(turma, "disciplinas_json", None))
 
 
 def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
@@ -56,6 +105,7 @@ def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
                 },
             )
 
+        discs = _normalizar_disciplinas_lista(form.disciplinas)
         new = turmas(
             id_prof=id_prof,
             fk_Escola_id_escola=id_escola,
@@ -63,6 +113,7 @@ def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
             serie_ano=form.serie_ano.strip() if form.serie_ano else None,
             letra=form.letra.strip() if form.letra else None,
             horario=form.horario.strip() if form.horario else None,
+            disciplinas_json=json.dumps(discs, ensure_ascii=False) if discs else None,
         )
         sessao.add(new)
         sessao.commit()
@@ -75,6 +126,7 @@ def AdicionarTurma(sessao: Session, form: TurmaRequest, id_prof: int):
             "serie_ano": new.serie_ano,
             "letra": new.letra,
             "horario": new.horario,
+            "disciplinas": discs,
         }
     except HTTPException:
         raise
@@ -130,6 +182,9 @@ def EditarTurma(sessao: Session, id_turma: int, form: TurmaRequest, id_prof: int
             turma.letra = form.letra.strip() or None
         if form.horario is not None:
             turma.horario = form.horario.strip() or None
+        if form.disciplinas is not None:
+            discs = _normalizar_disciplinas_lista(form.disciplinas)
+            turma.disciplinas_json = json.dumps(discs, ensure_ascii=False) if discs else None
         sessao.commit()
         sessao.refresh(turma)
         return {
@@ -140,6 +195,7 @@ def EditarTurma(sessao: Session, id_turma: int, form: TurmaRequest, id_prof: int
             "serie_ano": turma.serie_ano,
             "letra": turma.letra,
             "horario": turma.horario,
+            "disciplinas": parsear_disciplinas_turma(getattr(turma, "disciplinas_json", None)),
         }
     except HTTPException:
         raise

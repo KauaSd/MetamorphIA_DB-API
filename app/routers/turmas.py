@@ -1,9 +1,18 @@
-from database import Session, User_esc, pegar_bd, professores, select, turmas
+from database import Session, TurmaProfessor, User_esc, Usuario, pegar_bd, professores, select, turmas
 from dependencies import pegar_professor_logado
 from fastapi import APIRouter, Depends, HTTPException, status
-from schemas.schemas import Turma, TurmaSchema
+from schemas.schemas import Turma, TurmaSchema, VincularProfessorTurmaRequest
 from services.planos import listar_escolas_usuario, obter_contexto_escola
-from services.turma import AdicionarTurma, DeletaTurma, EditarTurma, PesquisarTurma
+from services.turma import (
+    AdicionarTurma,
+    DeletaTurma,
+    EditarTurma,
+    PesquisarTurma,
+    _normalizar_disciplinas_lista,
+    obter_disciplinas_turma_para_usuario,
+    parsear_disciplinas_turma,
+)
+import json
 
 Turma_router = APIRouter(prefix="/turma", tags=["turma"])
 
@@ -98,6 +107,7 @@ def ListarTurmas(
             "horario": getattr(t, "horario", None),
             "id_prof": t.id_prof,
             "id_escola": t.fk_Escola_id_escola,
+            "disciplinas": obter_disciplinas_turma_para_usuario(sessao, t, professor_logado.id_prof),
         }
         for t in lista
     ]
@@ -122,4 +132,82 @@ def ObterTurmaPorId(
         "horario": getattr(turma, "horario", None),
         "id_prof": turma.id_prof,
         "id_escola": turma.fk_Escola_id_escola,
+        "disciplinas": obter_disciplinas_turma_para_usuario(sessao, turma, professor_logado.id_prof),
+    }
+
+
+@Turma_router.get("/{id_turma}/professores")
+def listar_professores_da_turma(
+    id_turma: int,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    turma = sessao.get(turmas, id_turma)
+    if not turma:
+        raise HTTPException(status_code=404, detail="Turma não encontrada")
+    if professor_logado.tipo_usuario != "adm_sistema":
+        obter_contexto_escola(sessao, professor_logado.id_prof, turma.fk_Escola_id_escola)
+    vinculos = sessao.execute(
+        select(TurmaProfessor).where(TurmaProfessor.fk_Turma_id_turma == id_turma)
+    ).scalars().all()
+    resultado = []
+    for v in vinculos:
+        u = sessao.get(Usuario, v.fk_Usuario_id_usuario)
+        if not u:
+            continue
+        resultado.append({
+            "id_usuario": u.id_usuario,
+            "nome_usuario": u.nome_usuario,
+            "email_usuario": u.email_usuario,
+            "disciplinas": parsear_disciplinas_turma(v.disciplinas_json),
+        })
+    return resultado
+
+
+@Turma_router.put("/{id_turma}/professores")
+def vincular_professor_turma(
+    id_turma: int,
+    dados: VincularProfessorTurmaRequest,
+    sessao: Session = Depends(pegar_bd),
+    professor_logado: professores = Depends(pegar_professor_logado),
+):
+    turma = sessao.get(turmas, id_turma)
+    if not turma:
+        raise HTTPException(status_code=404, detail="Turma não encontrada")
+    ctx = obter_contexto_escola(sessao, professor_logado.id_prof, turma.fk_Escola_id_escola)
+    if ctx["papel"] not in ("adm", "adm_sistema"):
+        raise HTTPException(status_code=403, detail="Apenas o administrador da escola pode vincular professores à turma.")
+
+    alvo = None
+    if dados.id_usuario:
+        alvo = sessao.get(Usuario, dados.id_usuario)
+    elif dados.email:
+        alvo = sessao.execute(
+            select(Usuario).where(Usuario.email_usuario == dados.email.strip().lower())
+        ).scalars().first()
+    if not alvo:
+        raise HTTPException(status_code=404, detail="Professor não encontrado.")
+
+    discs = _normalizar_disciplinas_lista(dados.disciplinas)
+    vinc = sessao.execute(
+        select(TurmaProfessor).where(
+            TurmaProfessor.fk_Turma_id_turma == id_turma,
+            TurmaProfessor.fk_Usuario_id_usuario == alvo.id_usuario,
+        )
+    ).scalars().first()
+    if vinc:
+        vinc.disciplinas_json = json.dumps(discs, ensure_ascii=False)
+    else:
+        vinc = TurmaProfessor(
+            fk_Turma_id_turma=id_turma,
+            fk_Usuario_id_usuario=alvo.id_usuario,
+            disciplinas_json=json.dumps(discs, ensure_ascii=False),
+        )
+        sessao.add(vinc)
+    sessao.commit()
+    return {
+        "mensagem": "Disciplinas do professor na turma atualizadas com sucesso.",
+        "id_turma": id_turma,
+        "id_usuario": alvo.id_usuario,
+        "disciplinas": discs,
     }

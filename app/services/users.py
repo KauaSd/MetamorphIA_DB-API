@@ -420,15 +420,26 @@ def obter_perfil_completo_usuario(sessao: Session, usuario: Usuario) -> dict[str
         "adm_pro_plus",
     )
 
+    atualizado_em = getattr(usuario, "nome_real_atualizado_em", None)
+    dias_restantes_nome_real = 0
+    if atualizado_em is not None:
+        if atualizado_em.tzinfo is None:
+            atualizado_em = atualizado_em.replace(tzinfo=timezone.utc)
+        decorrido = datetime.now(timezone.utc) - atualizado_em
+        if decorrido < timedelta(days=30):
+            dias_restantes_nome_real = max(1, 30 - decorrido.days)
+
     return {
         "id_usuario": usuario.id_usuario,
         "nome_usuario": usuario.nome_usuario,
         "nome_real": getattr(usuario, "nome_real", None),
+        "nome_real_atualizado_em": atualizado_em.isoformat() if atualizado_em else None,
+        "dias_para_trocar_nome_real": dias_restantes_nome_real,
         "email_usuario": usuario.email_usuario,
         "telefone_usuario": usuario.telefone_usuario,
         "tipo_usuario": usuario.tipo_usuario,
         "modo_ativo": modo_ativo,
-        "perfil_professor_feito": bool(getattr(usuario, "perfil_professor_feito", False)),
+        "perfil_professor_feito": bool(getattr(usuario, "identificacao_feita", False) or getattr(usuario, "perfil_professor_feito", False)),
         "identificacao_feita": bool(getattr(usuario, "identificacao_feita", False)),
         "tutorial_visto": bool(getattr(usuario, "tutorial_visto", False)),
         "tutorial_institucional_visto": bool(getattr(usuario, "tutorial_institucional_visto", False)),
@@ -446,7 +457,10 @@ def obter_perfil_completo_usuario(sessao: Session, usuario: Usuario) -> dict[str
         "permissoes": {
             "eh_admin_sistema": eh_adm_sistema,
             "eh_admin_rede": eh_adm_rede,
-            "pode_alternar_modo_professor": usuario.tipo_usuario in ("adm_escola", "adm_pro_plus"),
+            "pode_alternar_modo_professor": (
+                usuario.tipo_usuario in ("adm_escola", "adm_pro_plus")
+                and bool(claims["pode_chat"])
+            ),
             "pode_acessar_painel_adm": eh_adm_sistema or eh_adm_rede or eh_adm_escola_ativo,
             "pode_gerenciar_professores": eh_adm_rede or eh_adm_escola_ativo,
             "pode_gerenciar_alunos": eh_adm_sistema or eh_adm_rede or eh_adm_alguma_escola,
@@ -472,6 +486,15 @@ def alternar_modo_usuario(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Apenas o administrador da escola (Institucional) pode alternar para o modo professor.",
+        )
+
+    vinc_escs = sessao.execute(
+        select(User_esc).where(User_esc.fk_Usuario_id_usuario == usuario.id_usuario)
+    ).scalars().all()
+    if vinc_escs and all(not v.pode_chat for v in vinc_escs):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Este perfil foi configurado apenas como administrador e não possui acesso ao modo Professor.",
         )
 
     modo_atual = getattr(usuario, "modo_ativo", "adm") or "adm"
@@ -510,10 +533,14 @@ def cria_prof(sessao: Session, dados: Professor) -> dict[str, Any]:
         doc_limpo = _limpar_documento(dados.cpf_cnpj)
         tags_str = _normalizar_tags(dados.tags)
 
+        nome_limpo = dados.nomeProf.strip()
         professor = professores(
             email_prof=dados.emailprof,
             num_prof=dados.numprof,
-            nome_prof=dados.nomeProf,
+            nome_prof=nome_limpo,
+            nome_real=nome_limpo,
+            nome_real_atualizado_em=datetime.now(timezone.utc),
+            perfil_professor_feito=True,
             senha_prof=security.cria_hash_senha(dados.senhaProf),
             cpf_cnpj=doc_limpo,
             tipo_usuario="normal",
@@ -945,19 +972,31 @@ def EditaProfessor(
         if dados.numprof is not None and dados.numprof != professor.num_prof:
             professor.num_prof = dados.numprof
 
-        era_primeiro_perfil = not bool(getattr(professor, "perfil_professor_feito", False))
         veio_nome_real = bool(dados.nomeReal and dados.nomeReal.strip())
-        if veio_nome_real:
-            professor.nome_real = dados.nomeReal.strip()
-            professor.perfil_professor_feito = True
+        veio_nome_prof = bool(dados.nomeProf and dados.nomeProf.strip())
 
-        if dados.nomeProf and dados.nomeProf.strip():
-            nome_limpo = dados.nomeProf.strip()
-            # No Modal 1 (primeira definição de nomeReal), não marca identificacao_feita se nomeProf
-            # apenas repetiu o nome inicial de cadastro; no Modal 2 (ou edição posterior), marca True.
-            if not (era_primeiro_perfil and veio_nome_real and nome_limpo == (professor.nome_prof or "").strip()):
-                professor.nome_prof = nome_limpo
-                professor.identificacao_feita = True
+        if veio_nome_real:
+            novo_real = dados.nomeReal.strip()
+            atual_real = (getattr(professor, "nome_real", None) or "").strip()
+            if novo_real != atual_real:
+                atualizado_em = getattr(professor, "nome_real_atualizado_em", None)
+                if atual_real and atualizado_em is not None:
+                    if atualizado_em.tzinfo is None:
+                        atualizado_em = atualizado_em.replace(tzinfo=timezone.utc)
+                    decorrido = datetime.now(timezone.utc) - atualizado_em
+                    if decorrido < timedelta(days=30):
+                        dias_restantes = max(1, 30 - decorrido.days)
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"O nome completo só pode ser alterado uma vez a cada 30 dias. Próxima alteração disponível em {dias_restantes} dia(s).",
+                        )
+                professor.nome_real = novo_real
+                professor.nome_real_atualizado_em = datetime.now(timezone.utc)
+                professor.perfil_professor_feito = True
+
+        if veio_nome_prof:
+            professor.nome_prof = dados.nomeProf.strip()
+            professor.identificacao_feita = True
 
         if dados.tags is not None:
             professor.tags_usuario = _normalizar_tags(dados.tags)
@@ -967,14 +1006,27 @@ def EditaProfessor(
         sessao.commit()
         sessao.refresh(professor)
 
+        atualizado_em_resp = getattr(professor, "nome_real_atualizado_em", None)
+        dias_rest_resp = 0
+        if atualizado_em_resp is not None:
+            if atualizado_em_resp.tzinfo is None:
+                atualizado_em_resp = atualizado_em_resp.replace(tzinfo=timezone.utc)
+            dec = datetime.now(timezone.utc) - atualizado_em_resp
+            if dec < timedelta(days=30):
+                dias_rest_resp = max(1, 30 - dec.days)
+
         return {
             "mensagem": "Professor editado com sucesso",
             "instrucoes_ia": professor.instrucoes_ia or "",
             "nome_real": getattr(professor, "nome_real", None),
             "nome_usuario": professor.nome_prof,
+            "dias_para_trocar_nome_real": dias_rest_resp,
             "perfil_professor_feito": bool(getattr(professor, "perfil_professor_feito", False)),
             "identificacao_feita": bool(professor.identificacao_feita),
         }
+
+    except HTTPException:
+        raise
 
     except OperationalError as e:
         print(f"[Users] OperationalError em EditaProfessor: {e}")

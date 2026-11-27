@@ -121,6 +121,10 @@ class Turma(BaseModel):
     letra: Optional[str] = Field(None, max_length=20)
     horario: Optional[str] = Field(None, max_length=60)
     id_escola: Optional[int] = Field(None, gt=0)
+    disciplinas: Optional[List[str] | str] = Field(
+        default=None,
+        validation_alias=AliasChoices("disciplinas", "componentes", "materias", "tags"),
+    )
 
     @model_validator(mode="after")
     def _garantir_nome_turma(self) -> "Turma":
@@ -282,9 +286,16 @@ class AdicionarProfessorRequest(BaseModel):
         )
 
 
+class VincularProfessorTurmaRequest(BaseModel):
+    email: Optional[str] = Field(None, max_length=150)
+    id_usuario: Optional[int] = Field(None, gt=0)
+    disciplinas: List[str] | str = Field(default_factory=list)
+
+
 class ConvidarProfessorRequest(BaseModel):
     email: str = Field(..., max_length=150)
     tags_areas: List[str] | str = Field(default_factory=list)
+    id_turma: Optional[int] = Field(None, gt=0)
     link_base: Optional[str] = Field(None, max_length=300)
 
     @field_validator("email")
