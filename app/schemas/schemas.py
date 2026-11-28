@@ -149,23 +149,11 @@ class TurmaSchema(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
-    requires_2fa: Optional[bool] = False
     refresh_token: Optional[str] = None
 
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: Optional[str] = Field(None, min_length=10, max_length=4096)
-
-
-class Validar2FARequest(BaseModel):
-    codigo: str = Field(..., min_length=4, max_length=10)
-
-
-class Tipo2FA(str, Enum):
-    NONE = "none"
-    TOTP = "totp"
-    EMAIL = "email"
-    SMS = "sms"
 
 
 class PesquisaAluno(BaseModel):

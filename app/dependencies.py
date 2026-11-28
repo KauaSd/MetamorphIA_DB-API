@@ -4,39 +4,15 @@ from typing import Annotated
 import jwt
 import security
 from config.settings import settings
-from database import pegar_bd, professores, user2famethods
+from database import pegar_bd, professores
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
-from schemas.schemas import Tipo2FA
 from sqlalchemy.orm import Session
 from twilio.rest import Client
 
 security_scheme = HTTPBearer()
 
-def pegar_2fa_prof(sessao: Session, id: int):
-    resultado = (
-        sessao.query(user2famethods).filter(user2famethods.id_prof == id).first()
-    )
-
-    if resultado is not None:
-        return resultado
-    else:
-        prof_existe = (
-            sessao.query(professores.id_prof).filter(professores.id_prof == id).scalar()
-        )
-        if not prof_existe:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="professor não encontrado")
-        mfa = user2famethods(
-            id_prof=id, tipo=Tipo2FA.NONE, secret=None, usa_verificacao=False
-        )
-    sessao.add(mfa)
-    sessao.commit()
-    sessao.refresh(mfa)
-    resultado = (
-        sessao.query(user2famethods).filter(user2famethods.id_prof == id).first()
-    )
-    return resultado
 
 def is_email(txt: str) -> bool:
     return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", txt))
@@ -99,26 +75,6 @@ def pegar_professor_logado(
         raise credentials_exception
     return professor
 
-
-def pegar_usuario_pendente_2fa(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security_scheme)],
-) -> dict:
-    token = credentials.credentials
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Não foi possível validar as credenciais",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = security.decodificar_jwt_padrao(token)
-        id_prof = payload.get("sub")
-        tipo_mfa = payload.get("2fa")
-
-        if id_prof is None or tipo_mfa is None:
-            raise credentials_exception
-        return {"id_prof": int(id_prof), "tipo_2fa": tipo_mfa}
-    except InvalidTokenError:
-        raise credentials_exception
 
 def envia_msg_wpp(
     sessao: Session,

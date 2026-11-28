@@ -32,8 +32,6 @@ from database import (
     professores,
     select,
     turmas,
-    user2facodes,
-    user2famethods,
 )
 import dependencies
 from fastapi import HTTPException, status
@@ -44,11 +42,9 @@ from schemas.schemas import (
     MicrosoftAuthRequest,
     Professor,
     Professoredita,
-    Tipo2FA,
     Token,
 )
 import security
-import services.mfa as fnmfa
 
 
 def _normalizar_tags(tags: Optional[list[str] | str]) -> Optional[str]:
@@ -323,7 +319,6 @@ def emitir_par_tokens(sessao: Session, usuario: Usuario) -> Token:
     return Token(
         access_token=access_token,
         token_type="bearer",
-        requires_2fa=False,
         refresh_token=refresh_token,
     )
 
@@ -549,15 +544,6 @@ def cria_prof(sessao: Session, dados: Professor) -> dict[str, Any]:
         sessao.add(professor)
         sessao.flush()
 
-        mfa = user2famethods(
-            tipo=Tipo2FA.NONE,
-            secret=None,
-            usa_verificacao=False,
-            data_criacao=datetime.now(timezone.utc),
-            id_prof=professor.id_prof,
-        )
-        sessao.add(mfa)
-
         grupo, escola, _contrato = provisionar_estrutura_inicial_usuario(
             sessao, professor, nome_escola_inicial=dados.nome_escola_inicial
         )
@@ -632,22 +618,7 @@ def logarProfessor(
         provisionar_estrutura_inicial_usuario(sessao, usuario)
         sessao.commit()
 
-    mfa = fnmfa.pegar_2fa_prof(sessao, usuario.id_prof)
-    if not mfa.usa_verificacao:
-        return emitir_par_tokens(sessao, usuario)
-    else:
-        access_token_expires = timedelta(minutes=5)
-        access_token = security.criar_access_token(
-            data={
-                "sub": str(usuario.id_prof),
-                "is_verified": False,
-                "2fa": str(mfa.tipo),
-            },
-            expires_delta=access_token_expires,
-        )
-    return Token(
-        access_token=access_token, token_type="bearer", requires_2fa=mfa.usa_verificacao
-    )
+    return emitir_par_tokens(sessao, usuario)
 
 
 def logar_com_google(dados: GoogleAuthRequest, sessao: Session) -> Token:
@@ -716,14 +687,6 @@ def logar_com_google(dados: GoogleAuthRequest, sessao: Session) -> Token:
         sessao.add(usuario)
         sessao.flush()
 
-        mfa = user2famethods(
-            tipo=Tipo2FA.NONE,
-            secret=None,
-            usa_verificacao=False,
-            data_criacao=datetime.now(timezone.utc),
-            id_prof=usuario.id_usuario,
-        )
-        sessao.add(mfa)
         provisionar_estrutura_inicial_usuario(sessao, usuario)
         sessao.commit()
         sessao.refresh(usuario)
@@ -823,14 +786,6 @@ def logar_com_microsoft(dados: MicrosoftAuthRequest, sessao: Session) -> Token:
         sessao.add(usuario)
         sessao.flush()
 
-        mfa = user2famethods(
-            tipo=Tipo2FA.NONE,
-            secret=None,
-            usa_verificacao=False,
-            data_criacao=datetime.now(timezone.utc),
-            id_prof=usuario.id_usuario,
-        )
-        sessao.add(mfa)
         provisionar_estrutura_inicial_usuario(sessao, usuario)
         sessao.commit()
         sessao.refresh(usuario)
@@ -842,41 +797,6 @@ def logar_com_microsoft(dados: MicrosoftAuthRequest, sessao: Session) -> Token:
         sessao.commit()
 
     return emitir_par_tokens(sessao, usuario)
-
-
-def troca_user2famethods(sessao: Session, id_prof: int, tipo: Tipo2FA, email: str):
-    mfa = sessao.query(user2famethods).filter(user2famethods.id_prof == id_prof).first()
-
-    if tipo == Tipo2FA.TOTP:
-        secret = security.gerar_secret_totp()
-        mfa.secret = secret
-        mfa.tipo = tipo
-        mfa.usa_verificacao = False
-        sessao.commit()
-        sessao.refresh(mfa)
-        qr_code = security.gerar_qrcode_totp(secret, email)
-
-        return {"qr_code": qr_code, "totp": True}
-    mfa.tipo = tipo
-    mfa.secret = None
-    mfa.usa_verificacao = False if tipo == Tipo2FA.NONE else True
-    sessao.commit()
-    sessao.refresh(mfa)
-    return {"message": "Ativação completa", "totp": False}
-
-
-def fn_confirma_totp(sessao: Session, id_prof: int):
-    mfa = sessao.query(user2famethods).filter(user2famethods.id_prof == id_prof).first()
-    if not mfa:
-        raise HTTPException(status_code=404, detail="Configuração de segundo fator não encontrada.")
-    mfa.usa_verificacao = True
-    sessao.commit()
-    sessao.refresh(mfa)
-    return {
-        "mensagem": "Verificação em duas etapas confirmada com sucesso.",
-        "tipo": mfa.tipo,
-        "usa_verificacao": bool(mfa.usa_verificacao),
-    }
 
 
 def deletaProfessor(
@@ -917,8 +837,6 @@ def deletaProfessor(
         sessao.execute(delete(turmas).where(turmas.id_prof == id_prof))
         sessao.execute(delete(PasswordResetCode).where(PasswordResetCode.id_prof == id_prof))
         sessao.execute(delete(RefreshToken).where(RefreshToken.id_prof == id_prof))
-        sessao.execute(delete(user2facodes).where(user2facodes.id_prof == id_prof))
-        sessao.execute(delete(user2famethods).where(user2famethods.id_prof == id_prof))
         sessao.execute(delete(User_esc).where(User_esc.fk_Usuario_id_usuario == id_prof))
         sessao.execute(delete(User_grupo).where(User_grupo.fk_Usuario_id_usuario == id_prof))
         conts_ids = sessao.execute(
@@ -1103,7 +1021,7 @@ def exportar_dados_usuario(
     sessao: Session,
     professor_logado: professores,
 ) -> dict[str, Any]:
-    """Exporta todos os dados vinculados ao professor (LGPD), excluindo senhas e segredos 2FA."""
+    """Exporta todos os dados vinculados ao professor (LGPD), excluindo senhas."""
     perfil_completo = obter_perfil_completo_usuario(sessao, professor_logado)
     escolas_lista = perfil_completo.get("escolas", [])
     ids_escolas = [e["id_escola"] for e in escolas_lista if "id_escola" in e]

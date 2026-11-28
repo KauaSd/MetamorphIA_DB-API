@@ -6,10 +6,8 @@ psycopg2-binary
 PyJWT
 cryptography
 google-auth
-pyotp
 python-dotenv
 python-multipart
-qrcode[pil]
 slowapi
 SQLAlchemy
 twilio

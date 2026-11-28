@@ -1,6 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
 from config.settings import settings
-from schemas.schemas import Tipo2FA
 from sqlalchemy import (
     Boolean,
     Column,
@@ -17,7 +16,6 @@ from sqlalchemy import (
     delete,
     select,
 )
-from sqlalchemy import Enum as sqlenum
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, declarative_base, relationship, synonym
 
@@ -307,27 +305,6 @@ class Mensagem(base):
     )
 
 
-class user2famethods(base):
-    __tablename__ = "user_2fa_methods"
-    id_methods = Column(Integer, primary_key=True, autoincrement=True)
-    tipo = Column(sqlenum(Tipo2FA), nullable=False)
-    secret = Column(String, nullable=True)
-    usa_verificacao = Column(Boolean, default=False)
-    data_criacao = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    id_prof = Column(Integer, ForeignKey("usuario.id_usuario"))
-
-
-class user2facodes(base):
-    __tablename__ = "user_2fa_codes"
-    id_codigo = Column(Integer, primary_key=True, autoincrement=True)
-    codigo = Column(String(6))
-    expira_em = Column(DateTime(timezone=True))
-    tentativas = Column(Integer, default=0)
-    id_prof = Column(Integer, ForeignKey("usuario.id_usuario"))
-
-
 class PasswordResetCode(base):
     __tablename__ = "password_reset_codes"
     id_reset = Column(Integer, primary_key=True, autoincrement=True)
@@ -453,49 +430,16 @@ def garantir_planos_iniciais(sessao: Session) -> dict[str, Plano]:
     return {k: existentes[k] for k in PLANOS_PADRAO if k in existentes}
 
 
-def _corrigir_fks_legadas_postgres(eng) -> None:
-    """Corrige FKs antigas em user_2fa_methods/user_2fa_codes que apontavam para 'professores' em vez de 'usuario'."""
-    if eng.dialect.name != "postgresql":
-        return
+def _remover_tabelas_2fa_obsoletas(eng) -> None:
+    """Remove as tabelas legadas user_2fa_codes e user_2fa_methods caso ainda existam no banco."""
     from sqlalchemy import text
 
     try:
         with eng.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    DO $$
-                    DECLARE
-                        r RECORD;
-                    BEGIN
-                        FOR r IN (
-                            SELECT tc.table_name, tc.constraint_name
-                            FROM information_schema.table_constraints tc
-                            JOIN information_schema.constraint_column_usage ccu
-                              ON tc.constraint_name = ccu.constraint_name
-                             AND tc.table_schema = ccu.table_schema
-                            WHERE tc.constraint_type = 'FOREIGN KEY'
-                              AND tc.table_name IN ('user_2fa_methods', 'user_2fa_codes')
-                              AND ccu.table_name = 'professores'
-                        ) LOOP
-                            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT IF EXISTS %I', r.table_name, r.constraint_name);
-                        END LOOP;
-                    END $$;
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    "ALTER TABLE user_2fa_methods DROP CONSTRAINT IF EXISTS fk_user_2fa_professores"
-                )
-            )
-            conn.execute(
-                text(
-                    "ALTER TABLE user_2fa_codes DROP CONSTRAINT IF EXISTS fk_user_2fa_codes_professores"
-                )
-            )
+            conn.execute(text("DROP TABLE IF EXISTS user_2fa_codes"))
+            conn.execute(text("DROP TABLE IF EXISTS user_2fa_methods"))
     except Exception as exc:
-        print(f"[Aviso] Não foi possível ajustar FKs legadas no PostgreSQL: {exc}")
+        print(f"[Aviso] Não foi possível remover tabelas 2FA obsoletas: {exc}")
 
 
 def _garantir_colunas_novas(eng) -> None:
@@ -596,9 +540,9 @@ def _inicializar_banco_com_fallback() -> None:
     global engine
     try:
         _garantir_extensao_e_indices_pgvector(engine)
+        _remover_tabelas_2fa_obsoletas(engine)
         base.metadata.create_all(bind=engine)
         _garantir_colunas_novas(engine)
-        _corrigir_fks_legadas_postgres(engine)
         _garantir_indice_hnsw_pgvector(engine)
     except Exception as exc:
         if settings.ENVIRONMENT == "production":

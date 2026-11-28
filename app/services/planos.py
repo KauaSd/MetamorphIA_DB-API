@@ -22,7 +22,6 @@ from database import (
     Usuario,
     garantir_planos_iniciais,
     select,
-    user2famethods,
 )
 from fastapi import HTTPException, status
 from schemas.schemas import (
@@ -32,7 +31,6 @@ from schemas.schemas import (
     ContratarPlanoRequest,
     ConvidarProfessorRequest,
     CriarEscolaRequest,
-    Tipo2FA,
 )
 import security
 from services.users import (
@@ -804,15 +802,6 @@ def adicionar_professor_escola(
         )
         sessao.add(prof)
         sessao.flush()
-        sessao.add(
-            user2famethods(
-                tipo=Tipo2FA.NONE,
-                secret=None,
-                usa_verificacao=False,
-                data_criacao=datetime.now(timezone.utc),
-                id_prof=prof.id_usuario,
-            )
-        )
 
     vinc = sessao.execute(
         select(User_esc).where(
@@ -1252,15 +1241,6 @@ def adicionar_professor_grupo_institucional(
         )
         sessao.add(prof)
         sessao.flush()
-        sessao.add(
-            user2famethods(
-                tipo=Tipo2FA.NONE,
-                secret=None,
-                usa_verificacao=False,
-                data_criacao=datetime.now(timezone.utc),
-                id_prof=prof.id_usuario,
-            )
-        )
     else:
         if prof.tipo_usuario == "normal":
             prof.tipo_usuario = "prof_institucional"

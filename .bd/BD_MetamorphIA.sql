@@ -2,7 +2,7 @@
 -- Script DDL de Criação do Banco de Dados: BD_MetamorphIA
 -- SGBD: PostgreSQL 18+
 -- Ajustado com Grupo, Planos/Limites, CPF/CNPJ, Tags/Áreas, Google Auth,
--- Isolamento de Chat por Professor, Perfil IA e Tabelas 2FA
+-- Isolamento de Chat por Professor e Perfil IA
 -- =======================================================================
 
 -- CREATE DATABASE "BD_MetamorphIA" WITH ENCODING = 'UTF8';
@@ -10,8 +10,6 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 DROP TABLE IF EXISTS aluno_memoria_vetorial CASCADE;
-DROP TABLE IF EXISTS user_2fa_codes CASCADE;
-DROP TABLE IF EXISTS user_2fa_methods CASCADE;
 DROP TABLE IF EXISTS mensag_al CASCADE;
 DROP TABLE IF EXISTS Mensagem CASCADE;
 DROP TABLE IF EXISTS chat CASCADE;
@@ -317,26 +315,6 @@ CREATE TABLE Mensagem (
         REFERENCES Usuario(id_usuario)
         ON UPDATE CASCADE
         ON DELETE SET NULL
-);
-
--- =======================================================================
--- 15. TABELAS DE AUTENTICAÇÃO 2FA
--- =======================================================================
-CREATE TABLE user_2fa_methods (
-    id_methods SERIAL PRIMARY KEY,
-    tipo VARCHAR(20) NOT NULL DEFAULT 'none',
-    secret VARCHAR(150),
-    usa_verificacao BOOLEAN DEFAULT FALSE,
-    data_criacao TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    id_prof INT NOT NULL REFERENCES Usuario(id_usuario) ON DELETE CASCADE
-);
-
-CREATE TABLE user_2fa_codes (
-    id_codigo SERIAL PRIMARY KEY,
-    codigo VARCHAR(6),
-    expira_em TIMESTAMP WITH TIME ZONE,
-    tentativas INT DEFAULT 0,
-    id_prof INT NOT NULL REFERENCES Usuario(id_usuario) ON DELETE CASCADE
 );
 
 -- =======================================================================

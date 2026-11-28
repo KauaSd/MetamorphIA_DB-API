@@ -3,8 +3,8 @@ import json
 from typing import Annotated, Optional
 import zipfile
 from config.settings import settings
-from database import OperationalError, Session, Tipo2FA, pegar_bd, professores
-from dependencies import pegar_professor_logado, pegar_usuario_pendente_2fa
+from database import OperationalError, Session, pegar_bd, professores
+from dependencies import pegar_professor_logado
 from fastapi import APIRouter, Cookie, Depends, Request, Response
 from schemas.schemas import (
     AlternarModoRequest,
@@ -20,11 +20,9 @@ from schemas.schemas import (
     RefreshTokenRequest,
     Token,
     TutorialVistoRequest,
-    Validar2FARequest,
     VerificarCodigoSenhaRequest,
 )
 from security import limiter
-import services.mfa as fnmfa
 import services.password_reset as pwd_reset
 import services.users as users
 
@@ -101,46 +99,6 @@ def renovar_token(
 ) -> Token:
     token_raw = (dados.refresh_token if dados else None) or refresh_token_cookie
     return users.renovar_tokens_por_refresh(sessao, token_raw)
-
-
-@Auth_router.post("/ativar2fa")
-def ativar2fa(
-    tipo_mfa: Tipo2FA,
-    sessao: Session = Depends(pegar_bd),
-    professor_logado: professores = Depends(pegar_professor_logado),
-):
-    return fnmfa.troca_user2famethods(
-        sessao, professor_logado.id_prof, tipo_mfa, professor_logado.email_prof
-    )
-
-
-@Auth_router.post("/verificar-2fa")
-@limiter.limit("5/minute")
-def verificar(
-    request: Request,
-    dados: Validar2FARequest,
-    dados_pendentes: Annotated[dict, Depends(pegar_usuario_pendente_2fa)],
-    sessao: Annotated[Session, Depends(pegar_bd)],
-) -> Token:
-    return fnmfa.verificar2fa(dados, dados_pendentes, sessao)
-
-
-@Auth_router.post("/confirma_totp")
-def confirma_totp(
-    sessao: Annotated[Session, Depends(pegar_bd)],
-    professor_logado: professores = Depends(pegar_professor_logado),
-):
-    return fnmfa.fn_confirma_totp(sessao, professor_logado.id_prof)
-
-
-@Auth_router.post("/envia_token")
-@limiter.limit("3/minute")
-def token(
-    request: Request,
-    sessao: Annotated[Session, Depends(pegar_bd)],
-    professor: Annotated[dict, Depends(pegar_usuario_pendente_2fa)],
-):
-    return fnmfa.envia_token(sessao, professor["id_prof"])
 
 
 @Auth_router.delete("/deletaProfessor/{id_professor}")

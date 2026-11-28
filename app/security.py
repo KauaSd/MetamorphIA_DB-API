@@ -1,12 +1,8 @@
-import base64
 from datetime import datetime, timedelta, timezone
-import io
 
 from config.settings import password_hash, settings
 from fastapi import Request
 import jwt
-import pyotp
-import qrcode
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -60,26 +56,3 @@ limiter = Limiter(
     key_func=obter_chave_rate_limit,
     default_limits=[settings.RATE_LIMIT_DEFAULT],
 )
-
-
-def gerar_secret_totp() -> str:
-    return pyotp.random_base32()
-
-
-def gerar_qrcode_totp(secret: str, email: str) -> str:
-    totp = pyotp.totp.TOTP(secret).provisioning_uri(
-        name=email, issuer_name="MetamorphIA"
-    )
-    img = qrcode.make(totp)
-    buffer = io.BytesIO()
-    img.save(buffer, format="PNG")
-    return (
-        f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
-    )
-
-
-def verificar_totp(secret: str, codigo: str) -> bool:
-    if not secret or not codigo:
-        return False
-    totp = pyotp.TOTP(secret)
-    return totp.verify(codigo, valid_window=1)
